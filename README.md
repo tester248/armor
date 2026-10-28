@@ -18,11 +18,37 @@ armor/
 │   ├── .env.example            # Copy to .env and fill in
 │   ├── requirements.txt        # Runtime deps
 │   └── requirements-dev.txt    # Test deps (httpx)
+├── start.ps1 / start.bat / start.sh # One-click stack startup
+├── stop.ps1 / stop.bat / stop.sh    # One-click stack shutdown
 ├── test_backend.py             # Root shims (run from repo root)
 └── test_vision.py
 ```
 
-## Quick start
+## Quick Start
+
+### 1. One-Click Startup (Recommended)
+
+Start both the FastAPI backend and Streamlit dashboard together:
+
+**Windows (PowerShell or double-click `.bat`):**
+```powershell
+.\start.ps1       # Or double-click start.bat
+```
+
+To stop all services cleanly:
+```powershell
+.\stop.ps1        # Or double-click stop.bat
+```
+
+**Linux / macOS:**
+```bash
+./start.sh
+./stop.sh
+```
+
+---
+
+### 2. Manual Setup & Startup
 
 ```powershell
 cd armor-backend
@@ -32,10 +58,10 @@ pip install -r requirements.txt
 copy .env.example .env
 # edit .env as needed
 
-# Terminal 1: backend
+# Terminal 1: backend gateway
 python -m uvicorn backend.main:app --reload --port 8000
 
-# Terminal 2: dashboard
+# Terminal 2: operator dashboard
 streamlit run dashboard/app.py --server.port 8501
 
 # Terminal 3: simulated ESP32 telemetry (optional)
@@ -50,7 +76,7 @@ cd armor-backend
 .\.venv\Scripts\python.exe test_vision.py
 ```
 
-## Git workflow
+## Git Workflow
 
 `main` (demo-ready) ← `dev` (integration) ← short-lived `feat/*`, `chore/*`, `fix/*` branches.
 Never commit `.env`, `data/`, or `.venv/`.
