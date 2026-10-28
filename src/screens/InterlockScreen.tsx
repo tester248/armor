@@ -35,6 +35,11 @@ export default function InterlockScreen() {
     }
   };
 
+  const toggleBenchMode = async (value: boolean) => {
+    setBenchMode(value);
+    setMsg(`Bench Test Mode: ${value ? 'ON — proximity lockouts suppressed' : 'OFF — full safety active'}`);
+  };
+
   return (
     <View style={styles.container}>
       {/* Motor Control */}
@@ -85,10 +90,10 @@ export default function InterlockScreen() {
             Suppresses desk proximity lockouts during calibration. Maps to Blynk V5.
           </Text>
           <View style={styles.toggleRow}>
-            <Text>Bench Test Mode</Text>
+            <Text style={{ fontSize: 15 }}>Bench Test Mode</Text>
             <Switch
               value={benchMode}
-              onValueChange={setBenchMode}
+              onValueChange={toggleBenchMode}
               color={STATUS.INFO}
             />
           </View>

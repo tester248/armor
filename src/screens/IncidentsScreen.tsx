@@ -4,7 +4,7 @@ import { Card, Text, Button, ActivityIndicator, Icon, Chip } from 'react-native-
 import { api, DEFAULT_DEVICE_ID } from '../api';
 import { STATUS, SPACING } from '../theme';
 
-const API_BASE = process.env.EXPO_PUBLIC_ARMOR_API_URL || 'http://10.0.2.2:8000';
+const API_BASE = process.env.EXPO_PUBLIC_ARMOR_API_URL || 'http://10.24.103.187:8000';
 
 export default function IncidentsScreen() {
   const [incidents, setIncidents] = useState<any[]>([]);
@@ -109,6 +109,6 @@ const styles = StyleSheet.create({
   label: { color: STATUS.MUTED, fontSize: 13 },
   value: { color: '#f8fafc', fontSize: 14, fontWeight: '600' },
   time: { fontSize: 11, color: STATUS.MUTED, marginTop: 4 },
-  snapshot: { width: '100%', height: 200, borderRadius: 8, backgroundColor: '#020617' },
+  snapshot: { width: '100%', height: 200, borderRadius: 8, backgroundColor: '#0a0e17' },
   muted: { color: STATUS.MUTED, fontStyle: 'italic' },
 });

@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { View, StyleSheet, ActivityIndicator } from 'react-native';
+import { View, StyleSheet, ActivityIndicator, Image } from 'react-native';
 import { Card, Text, Button, Icon, Chip } from 'react-native-paper';
-import { WebView } from 'react-native-webview';
+// MJPEG streams rendered via Image component (supports MJPEG URLs)
 import { api, DEFAULT_DEVICE_ID, WS_BASE } from '../api';
 import { STATUS, SPACING } from '../theme';
 
@@ -75,11 +75,10 @@ export default function VisionScreen() {
         <Card.Title title="Live Camera" left={(p) => <Icon {...p} source="video" />} />
         <Card.Content>
           <View style={styles.feedContainer}>
-            <WebView
-              source={{ html: `<img src="${STREAM_URL}" style="width:100%;height:100%;object-fit:contain;" />` }}
-              style={styles.webview}
-              scrollEnabled={false}
-              scalesPageToFit={false}
+            <Image
+              source={{ uri: STREAM_URL }}
+              style={styles.feedImage}
+              resizeMode="contain"
             />
           </View>
         </Card.Content>
@@ -129,10 +128,10 @@ export default function VisionScreen() {
               {snapshotUrl && (
                 <View style={styles.snapshotContainer}>
                   <Text style={styles.label}>Result Snapshot:</Text>
-                  <WebView
-                    source={{ html: `<img src="${snapshotUrl}" style="width:100%;height:100%;object-fit:contain;" />` }}
-                    style={styles.snapshotWebview}
-                    scrollEnabled={false}
+                  <Image
+                    source={{ uri: snapshotUrl }}
+                    style={styles.snapshotImage}
+                    resizeMode="contain"
                   />
                 </View>
               )}
@@ -156,14 +155,14 @@ const styles = StyleSheet.create({
   container: { flex: 1, padding: SPACING.lg },
   card: { marginBottom: SPACING.md },
   feedContainer: { height: 280, borderRadius: 8, overflow: 'hidden', backgroundColor: '#020617' },
-  webview: { flex: 1, backgroundColor: '#020617' },
+  feedImage: { width: '100%', height: '100%' },
   btn: { marginBottom: SPACING.sm },
   statusRow: { flexDirection: 'row', alignItems: 'center', marginTop: 8 },
   resultBox: { marginTop: SPACING.md, padding: SPACING.md, borderRadius: 8, backgroundColor: '#1e293b' },
   resultHeader: { marginBottom: SPACING.sm },
   resultText: { fontSize: 13, color: '#f8fafc', marginBottom: 2 },
-  snapshotContainer: { height: 200, marginTop: SPACING.sm, borderRadius: 8, overflow: 'hidden' },
-  snapshotWebview: { flex: 1, backgroundColor: '#020617' },
+  snapshotContainer: { height: 200, marginTop: SPACING.sm, borderRadius: 8, overflow: 'hidden', backgroundColor: '#020617' },
+  snapshotImage: { width: '100%', height: '100%' },
   label: { fontSize: 12, color: STATUS.MUTED, marginBottom: 4 },
   error: { color: STATUS.DANGER, marginTop: 8 },
 });
