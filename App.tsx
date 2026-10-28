@@ -7,6 +7,8 @@ import DashboardScreen from './src/screens/DashboardScreen';
 import InterlockScreen from './src/screens/InterlockScreen';
 import IncidentsScreen from './src/screens/IncidentsScreen';
 import WorkersScreen from './src/screens/WorkersScreen';
+import VisionScreen from './src/screens/VisionScreen';
+import CalibrationScreen from './src/screens/CalibrationScreen';
 
 const Tab = createBottomTabNavigator();
 
@@ -21,10 +23,13 @@ export default function App() {
             tabBarStyle: { backgroundColor: '#121a2b' },
             tabBarActiveTintColor: '#06b6d4',
             tabBarInactiveTintColor: '#94a3b8',
+            tabBarLabelStyle: { fontSize: 11 },
           }}
         >
           <Tab.Screen name="Live" component={DashboardScreen} options={{ tabBarIcon: ({ color }) => <TabIcon name="chart-line" color={color} /> }} />
           <Tab.Screen name="Safety" component={InterlockScreen} options={{ tabBarIcon: ({ color }) => <TabIcon name="lock" color={color} /> }} />
+          <Tab.Screen name="Vision" component={VisionScreen} options={{ tabBarIcon: ({ color }) => <TabIcon name="video" color={color} /> }} />
+          <Tab.Screen name="Calibrate" component={CalibrationScreen} options={{ tabBarIcon: ({ color }) => <TabIcon name="tune" color={color} /> }} />
           <Tab.Screen name="Incidents" component={IncidentsScreen} options={{ tabBarIcon: ({ color }) => <TabIcon name="clipboard-alert" color={color} /> }} />
           <Tab.Screen name="Badges" component={WorkersScreen} options={{ tabBarIcon: ({ color }) => <TabIcon name="badge-account" color={color} /> }} />
         </Tab.Navigator>
