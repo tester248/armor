@@ -45,14 +45,25 @@ NORMAL ── smoothed RSSI ≥ −65 dBm ──► PROXIMITY_ALERT ── camer
 - **LOCKOUT:** Latched. Core 1 holds Enable LOW, red LED on, telemetry flagged with the lockout condition code. Snapshot captured, incident logged in SQLite, Telegram alert attempted (internet-dependent).
 - **RESET:** Only after manager acknowledgement AND a compliant re-check (or an explicit, logged manager override). Enable restored HIGH → NORMAL. There is no automatic reset on timeout.
 
-## 4. Vision pipeline (detection, not segmentation)
+## 4. Vision pipeline (Roboflow Workflow: RF-DETR + SAM 3)
 
-- Model: YOLOv8n detection, `snehilsanyal/Construction-Site-Safety-PPE-Detection` → `models/best.pt`, offline on the laptop. Fallback only: keremberke yolov8m (slower; do not claim its FPS).
-- Confidence threshold: `conf = 0.40`.
+- Model: Roboflow Workflow "Helmet Check Hackathon Demo"
+  - Workspace: `ashwin-mathur`
+  - Workflow ID: `helmet-check-hackathon-demo-1793134805931`
+  - Endpoint: `POST https://serverless.roboflow.com/ashwin-mathur/workflows/helmet-check-hackathon-demo-1793134805931`
+  - Declared input: `image` (image)
+- Client: `inference_sdk.InferenceHTTPClient` with header-based auth
+  - `api_key_transport="header"` (never query string or body)
+  - Per-request timeout: 30 s (configurable via `ROBOFLOW_REQUEST_TIMEOUT_S`)
+  - Retries: 3 attempts with exponential backoff (1s, 2s, 4s)
+  - Typed errors: `RoboflowAuthError` (401/403), `RoboflowTimeoutError`, `RoboflowResponseError`
+- Auth: `ROBOFLOW_API_KEY` from `.env` (gitignored). Get it at app.roboflow.com/settings/api — use a **secret (private)** key, not a publishable one.
 - Frame handling: event-driven only (idle until a proximity wake-up); evaluate every 3rd–5th frame to cut compute.
-- ROI: OpenCV tripwire polygon over the danger zone; only boxes whose centre falls inside the polygon count.
-- Compliance rule (must match the loaded weights' spellings exactly): **violation = Person in ROI AND (NO-Hardhat OR NO-Safety Vest)**. Note the spellings differ between weight sets (`NO-Hardhat` here vs `No hardhat` in Roboflow's hosted model) — check the string before the demo, not during it.
-- Output: verdict + annotated frame (boxes only, no masks).
+- Compliance rule: PASS if `compliance_ratio >= HELMET_COMPLIANCE_THRESHOLD` (default 0.65). The ratio is read from the workflow's real output (discovered dynamically from response keys such as `compliance_ratio`, `confidence`, `score`); if the workflow omits it, 0.9/0.1 is derived from pass/fail.
+- Helmet status: discovered dynamically from response keys (`helmet_status`, `status`, `helmet`, `result`, `label`, `prediction`).
+- Output image: base64-decoded from workflow output keys (`output_image`, `annotated_image`, `segmented_helmet_image`, …) and written to the snapshot directory. Never logged or held in memory longer than needed.
+- Fallback: when `ROBOFLOW_API_KEY` is not configured, `vision_engine.inspect()` returns `compliant=None` (`VISION_UNAVAILABLE`) — the interlock never acts on a guessed verdict.
+- Verification: `backend.vision.smoke_test(image_path)` runs the workflow on one sample image and asserts output keys exist.
 
 ## 5. Firmware split (corrected)
 
