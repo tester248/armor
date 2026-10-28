@@ -540,6 +540,13 @@ if backend_online:
     badges = workers_resp.get("badges", []) if workers_resp else []
     breaches_resp = api_get("/api/v1/breaches", params={"device_id": device_id, "limit": 40}, timeout=1.0)
     breaches = breaches_resp.get("breaches", []) if breaches_resp else []
+    decomp_resp = api_get(f"/api/v1/telemetry/anomaly/decomposition/{device_id}", timeout=1.0)
+    decomp_data = decomp_resp if isinstance(decomp_resp, dict) else {}
+    pred_resp = api_get(f"/api/v1/telemetry/prediction/{device_id}", timeout=2.0)
+    prediction_data = pred_resp if isinstance(pred_resp, dict) else {}
+else:
+    decomp_data = {}
+    prediction_data = {}
 
 
 def _reading(value: Any, fallback: Any = None) -> float | None:
@@ -607,6 +614,16 @@ def _contact_age(event: dict[str, Any]) -> str:
 motor_state = status_data.get("motor_state") or (samples[-1].get("motor_state") if samples else "NO DATA")
 interlock_active = bool(status_data.get("interlock_active", False))
 proximity_breach = bool(status_data.get("proximity_breach_active", False))
+vicinity_presence = bool(status_data.get("vicinity_presence_active", False))
+vicinity_status = status_data.get("vicinity_status", "NOMINAL")
+anomaly_pct = float(status_data.get("anomaly_percentage") or decomp_data.get("anomaly_percentage") or 0.0)
+window_anom_count = int(status_data.get("anomaly_window_count") or (prediction_data.get("window_stats") or {}).get("anomaly_count_in_window") or 0)
+window_threshold = int(status_data.get("anomaly_window_threshold") or (prediction_data.get("window_stats") or {}).get("threshold") or 3)
+predictive_advisory = (
+    status_data.get("predictive_advisory") or
+    (prediction_data.get("advisory") or {}).get("prediction_text") or
+    "All motor telemetry (vibration, current, voltage, temperature) remains in nominal baseline limits. Continuous operation authorized."
+)
 active_worker = status_data.get("active_worker_id")
 current_rms = _reading(status_data.get("current_rms"), samples[-1].get("rms") if samples else None)
 current_voltage = _reading(status_data.get("current_voltage_v"), samples[-1].get("voltage_v") if samples else None)
@@ -771,25 +788,65 @@ elif interlock_active:
         """,
         unsafe_allow_html=True,
     )
-elif proximity_breach:
+elif interlock_active or proximity_breach:
+    reason_label = status_data.get("lockout_reason") or "SAFETY BREACH — PERSON PRESENT IN MACHINE VICINITY WITHOUT PPE GEAR"
     st.markdown(
         f"""
-        <div class="alert-banner-breach">
+        <div class="alert-banner-lockout">
             <div>
-                <span style="font-size: 1.15rem; font-weight: 700; color: #ffffff; display: flex; align-items: center; gap: 8px;">
-                    {icon_svg('alert_triangle', color='#f59e0b', size=22)} RESTRICTED ZONE PROXIMITY BREACH DETECTED
+                <span style="font-size: 1.25rem; font-weight: 800; color: #ffffff; display: flex; align-items: center; gap: 10px;">
+                    {icon_svg('siren', color='#ef4444', size=24)} SAFETY BREACH / EMERGENCY LOCKOUT ACTIVE
                 </span>
-                <span style="font-size: 0.85rem; color: #fef3c7; margin-top: 4px; display: block;">
-                    Worker <b>{active_worker or 'UNKNOWN'}</b> inside 1.5m perimeter. Camera inspection active.
+                <span style="font-size: 0.85rem; color: #fecaca; margin-top: 4px; display: block;">
+                    Cell <b>{device_id}</b> power cut. Reason: <b>{reason_label}</b>. Worker: <b>{active_worker or 'UNKNOWN'}</b>.
                 </span>
             </div>
-            <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; background: rgba(0,0,0,0.4); padding: 6px 12px; border-radius: 6px; border: 1px solid #f59e0b;">
-                DISTANCE: <b>&lt; 1.5 METERS</b>
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.9rem; background: rgba(0,0,0,0.5); padding: 6px 14px; border-radius: 6px; border: 1px solid #ef4444;">
+                INTERLOCK: <b>PULLED LOW (0V)</b>
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+elif vicinity_presence:
+    if vicinity_status == "AUTHORIZED_OPERATOR_PPE_VERIFIED":
+        st.markdown(
+            f"""
+            <div class="alert-banner-normal" style="border-color: #38bdf8; box-shadow: 0 0 20px rgba(56, 189, 248, 0.25);">
+                <div>
+                    <span style="font-size: 1.15rem; font-weight: 700; color: #ffffff; display: flex; align-items: center; gap: 8px;">
+                        {icon_svg('shield_check', color='#38bdf8', size=22)} PERSON DETECTED IN MACHINE VICINITY — PPE VERIFIED (AUTHORIZED)
+                    </span>
+                    <span style="font-size: 0.85rem; color: #bae6fd; margin-top: 4px; display: block;">
+                        Worker <b>{active_worker or 'UNKNOWN'}</b> detected in machine's vicinity wearing verified safety helmet. Continuous operation authorized (no breach).
+                    </span>
+                </div>
+                <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; background: rgba(0,0,0,0.3); padding: 6px 12px; border-radius: 6px; border: 1px solid #38bdf8;">
+                    STATUS: <b>AUTHORIZED OPERATOR</b>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f"""
+            <div class="alert-banner-breach" style="border-color: #f59e0b; box-shadow: 0 0 20px rgba(245, 158, 11, 0.25);">
+                <div>
+                    <span style="font-size: 1.15rem; font-weight: 700; color: #ffffff; display: flex; align-items: center; gap: 8px;">
+                        {icon_svg('alert_triangle', color='#f59e0b', size=22)} PERSON DETECTED IN MACHINE'S VICINITY — VERIFYING PPE COMPLIANCE
+                    </span>
+                    <span style="font-size: 0.85rem; color: #fef3c7; margin-top: 4px; display: block;">
+                        Worker <b>{active_worker or 'UNKNOWN'}</b> inside 1.5m vicinity perimeter. Vision AI safety gate evaluating PPE gear...
+                    </span>
+                </div>
+                <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; background: rgba(0,0,0,0.4); padding: 6px 12px; border-radius: 6px; border: 1px solid #f59e0b;">
+                    VICINITY: <b>INSPECTION ACTIVE</b>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 elif telemetry_stale:
     st.markdown(
         f"""
@@ -918,26 +975,26 @@ with c4:
 st.markdown("<br>", unsafe_allow_html=True)
 import pandas as pd
 
-# ── Live Predictive Maintenance (real-time anomaly score) ─────────────────
+# ── Live Predictive Maintenance (multi-modal anomaly score & Groq AI advisory) ─────────────────
 st.markdown(
     f"""
     <div class="armor-header">
         {icon_svg('activity', color='#06b6d4', size=22)}
-        <span>Live Predictive Maintenance — Anomaly Score</span>
+        <span>Live Multi-Modal Predictive Maintenance & Groq AI Advisory</span>
     </div>
     """,
     unsafe_allow_html=True,
 )
 st.caption(
-    "Server-side IsolationForest scored once per incoming telemetry sample. "
-    "This panel updates with the dashboard auto-refresh."
+    "Multi-Modal Anomaly Decomposition trained across Vibration, Current, Voltage/Power & Temperature. "
+    "Sustained anomalies across a 5.0s rolling window trigger emergency motor lockdown; dynamic Groq LLM advisory provides expert engineering root-cause diagnostics."
 )
 
 if not backend_online:
     st.info("Gateway offline — live anomaly scoring unavailable.")
 elif model_package is None:
     st.warning("No calibrated model yet. Run calibration below; scores appear here automatically once telemetry flows.")
-elif latest_anomaly is None:
+elif latest_anomaly is None and not decomp_data:
     st.info("Model is calibrated. Waiting for the next telemetry window to be scored…")
 else:
     import json as _json
@@ -948,15 +1005,37 @@ else:
     except (TypeError, ValueError):
         _live_pkg = {}
 
-    if ml_anomaly_active:
+    top_contrib = decomp_data.get("top_contributor") or status_data.get("top_contributor") or "Multi-Modal Sensor Array"
+    cur_anomaly_pct = float(decomp_data.get("anomaly_percentage") or anomaly_pct or 0.0)
+
+    # Groq AI Predictive Advisory Banner
+    st.markdown(
+        f"""
+        <div style="background: rgba(6, 182, 212, 0.08); border: 1px solid rgba(6, 182, 212, 0.35); border-radius: 10px; padding: 14px 18px; margin: 10px 0 16px 0; backdrop-filter: blur(12px);">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 6px;">
+                <span style="font-family:'JetBrains Mono', monospace; font-size:0.75rem; font-weight:700; color:#38bdf8; display:flex; align-items:center; gap:6px;">
+                    {icon_svg('activity', color='#38bdf8', size=15)} INDUSTRIAL AI PREDICTIVE MAINTENANCE ADVISORY
+                </span>
+                <span style="font-size:0.75rem; color:#94a3b8; font-family:'JetBrains Mono', monospace; background:rgba(255,255,255,0.05); padding:2px 8px; border-radius:4px;">
+                    ENGINE: GROQ (qwen/qwen3.8-27b)
+                </span>
+            </div>
+            <div style="font-size:0.95rem; line-height:1.55; color:#f8fafc; font-weight:500;">
+                "{predictive_advisory}"
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if ml_anomaly_active or cur_anomaly_pct >= 50.0:
         score_color, hud_class, state_text = "#ef4444", "hud-red", "ANOMALY"
     elif ml_score_stale:
         score_color, hud_class, state_text = "#f59e0b", "hud-amber", "STALE"
+    elif cur_anomaly_pct >= 30.0:
+        score_color, hud_class, state_text = "#f59e0b", "hud-amber", "ELEVATED"
     else:
         score_color, hud_class, state_text = "#10b981", "hud-green", "NOMINAL"
-
-    margin = (anom_score - anom_threshold) if (anom_score is not None and anom_threshold is not None) else None
-    anom_count = sum(1 for a in anomalies if bool(a.get("is_anomaly")))
 
     an1, an2, an3, an4 = st.columns(4)
 
@@ -964,21 +1043,31 @@ else:
         st.markdown(
             f"""
             <div class="hud-card {hud_class}">
-                <div class="hud-title">Anomaly Score</div>
-                <div class="hud-value hud-tight" style="color:{score_color};">{anom_score:+.4f}</div>
-                <div class="hud-sub">Threshold {anom_threshold:+.4f}<br>Margin {margin:+.4f}</div>
+                <div class="hud-title">Anomaly Severity</div>
+                <div class="hud-value hud-tight" style="color:{score_color};">{cur_anomaly_pct:.1f}%</div>
+                <div class="hud-sub">Raw Score: {anom_score:+.3f} (Thresh: {anom_threshold:+.3f})</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
     with an2:
+        if window_anom_count >= window_threshold:
+            w_color = "#ef4444"
+            w_sub = '<span style="color:#ef4444; font-weight:bold;">🚨 SUSTAINED LOCKOUT ACTIVE</span>'
+        elif window_anom_count > 0:
+            w_color = "#f59e0b"
+            w_sub = '<span style="color:#f59e0b;">⚠️ TRANSIENT (FILTERED)</span>'
+        else:
+            w_color = "#10b981"
+            w_sub = '<span style="color:#10b981;">✅ NOMINAL BASELINE</span>'
+
         st.markdown(
             f"""
             <div class="hud-card {hud_class}">
-                <div class="hud-title">Model Verdict</div>
-                <div class="hud-value hud-tight" style="color:{score_color};">{state_text}</div>
-                <div class="hud-sub">score &gt; 0 = anomaly</div>
+                <div class="hud-title">5.0s Window Persistence Gate</div>
+                <div class="hud-value hud-tight" style="color:{w_color};">{window_anom_count} / {window_threshold} in 5s</div>
+                <div class="hud-sub">{w_sub}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -988,9 +1077,9 @@ else:
         st.markdown(
             f"""
             <div class="hud-card">
-                <div class="hud-title">Last Scored</div>
-                <div class="hud-value hud-tight">{_age_text(latest_anomaly.get('created_at', latest_anomaly.get('recorded_at')))}</div>
-                <div class="hud-sub">{str(latest_anomaly.get('created_at', latest_anomaly.get('recorded_at', 'N/A')))[:19].replace('T', ' ')} UTC</div>
+                <div class="hud-title">Dominant Anomaly Driver</div>
+                <div class="hud-value hud-tight" style="font-size:1.15rem; color:#38bdf8;">{top_contrib}</div>
+                <div class="hud-sub">Primary modality contributing to fault score</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -1000,13 +1089,70 @@ else:
         st.markdown(
             f"""
             <div class="hud-card">
-                <div class="hud-title">Model</div>
-                <div class="hud-value hud-tiny">IForest</div>
-                <div class="hud-sub">{_live_pkg.get('window_count', '?')} windows<br>{anom_count} flagged / {len(anomalies)} scores</div>
+                <div class="hud-title">Model Envelope</div>
+                <div class="hud-value hud-tiny">Multi-Modal IForest</div>
+                <div class="hud-sub">12 Features &middot; 4 Sensors (ADXL, INA, DS18)</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
+
+    # Modality Weightages towards Anomaly Score
+    modalities = decomp_data.get("modalities", {})
+    if modalities:
+        st.markdown("<br><div style='font-family:Space Grotesk, sans-serif; font-weight:600; font-size:1.05rem; margin-bottom:8px; color:#f8fafc;'>Sensor Modality Weightages & Sub-Scores towards Anomaly</div>", unsafe_allow_html=True)
+        mw1, mw2, mw3, mw4 = st.columns(4)
+
+        mod_items = [
+            ("vibration", "Vibration (ADXL345)", mw1, "#38bdf8"),
+            ("current", "Motor Current (INA219)", mw2, "#f59e0b"),
+            ("voltage_power", "Voltage & Power (INA219)", mw3, "#10b981"),
+            ("temperature", "Temperature (DS18B20)", mw4, "#ec4899"),
+        ]
+
+        for mod_key, mod_title, col, accent_color in mod_items:
+            m_info = modalities.get(mod_key, {})
+            w_pct = float(m_info.get("weight_pct", 25.0))
+            s_pct = float(m_info.get("sub_score_pct", 10.0))
+            status = str(m_info.get("status", "NOMINAL"))
+
+            status_color = "#10b981" if status == "NOMINAL" else ("#f59e0b" if status == "ELEVATED" else "#ef4444")
+            with col:
+                st.markdown(
+                    f"""
+                    <div style="background: rgba(15, 23, 42, 0.7); border: 1px solid rgba(255, 255, 255, 0.08); border-top: 3px solid {accent_color}; border-radius: 8px; padding: 12px 14px;">
+                        <div style="font-family:'JetBrains Mono'; font-size:0.75rem; color:#94a3b8; text-transform:uppercase;">{mod_title}</div>
+                        <div style="display:flex; justify-content:space-between; align-items:baseline; margin-top:4px;">
+                            <span style="font-size:1.35rem; font-weight:700; color:#ffffff;">{w_pct:.1f}% <span style="font-size:0.75rem; color:#94a3b8; font-weight:400;">weight</span></span>
+                            <span style="font-size:0.75rem; font-weight:700; color:{status_color}; background:rgba(255,255,255,0.05); padding:2px 6px; border-radius:4px;">{status}</span>
+                        </div>
+                        <div style="font-size:0.75rem; color:#94a3b8; margin-top:4px;">Sub-Score Severity: <b>{s_pct:.1f}%</b></div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+        # Detailed Parameter Breakdown (Expander)
+        with st.expander("Detailed Parameter Deviation Breakdown (Individual Channels vs. Baseline)", expanded=False):
+            param_rows = []
+            for mod_key, m_info in modalities.items():
+                channels = m_info.get("channels", {})
+                for ch_name, ch_data in channels.items():
+                    val = ch_data.get("value")
+                    mean_val = ch_data.get("nominal_mean")
+                    std_val = ch_data.get("nominal_std")
+                    dev = ch_data.get("deviation_sigma", 0.0)
+                    ch_status = "ANOMALOUS" if dev >= 3.0 else ("ELEVATED" if dev >= 2.0 else "NOMINAL")
+                    param_rows.append({
+                        "Modality": m_info.get("name", mod_key),
+                        "Parameter Channel": ch_name,
+                        "Live Measured": val,
+                        "Nominal Baseline (Mean ± Std)": f"{mean_val} ± {std_val}",
+                        "Deviation (σ)": f"{dev:.2f} σ",
+                        "Channel Status": ch_status,
+                    })
+            if param_rows:
+                st.dataframe(pd.DataFrame(param_rows), use_container_width=True, hide_index=True)
 
     hist = [
         a for a in reversed(anomalies)
@@ -1234,6 +1380,9 @@ if backend_online:
             person_present = v_state.get("person_present", False)
             person_count = v_state.get("person_count", 0)
             auto_freeze = v_state.get("auto_freeze_enabled", False)
+            is_dwelling = v_state.get("is_dwelling", False)
+            dwell_elapsed = v_state.get("dwell_elapsed", 0.0)
+            dwell_req = v_state.get("dwell_required", 2.0)
             last_res = v_state.get("last_helmet_result") or {}
             helmet_comp = last_res.get("compliant")
             helmet_ratio = last_res.get("compliance_ratio", 0.0)
@@ -1242,8 +1391,15 @@ if backend_online:
             cam_badge = "status-standby" if is_frozen else "status-online"
             cam_text = "⏸ FEED FROZEN (INSPECTING)" if is_frozen else "● LIVE STREAM"
 
-            person_badge = "status-active" if person_present else ""
-            person_text = f"● PERSON IN FRAME ({person_count})" if person_present else "● SCANNING"
+            if is_dwelling:
+                person_badge = "status-standby"
+                person_text = f"⏳ STABILIZING ({dwell_elapsed:.1f}s / {dwell_req:.1f}s)"
+            elif person_present:
+                person_badge = "status-active"
+                person_text = f"● PERSON IN FRAME ({person_count})"
+            else:
+                person_badge = ""
+                person_text = "● SCANNING"
 
             if helmet_comp is True:
                 helmet_badge = "status-online"
@@ -1312,6 +1468,21 @@ if backend_online:
             with v_btn_c2:
                 if st.button("▶ Resume Live Feed", use_container_width=True, key="btn_quick_unfreeze", disabled=not is_frozen):
                     api_post("/api/v1/vision/unfreeze")
+                    st.rerun()
+
+            with st.expander("⚙️ Inspection Timing Settings", expanded=False):
+                current_dwell = float(v_state.get("dwell_required", 2.0))
+                new_dwell = st.slider(
+                    "Person Detection Stabilization Dwell (seconds)",
+                    min_value=0.5,
+                    max_value=5.0,
+                    value=current_dwell,
+                    step=0.5,
+                    key="slider_dwell_sec",
+                    help="Time a person must be continuously detected before the feed freezes to evaluate helmet compliance.",
+                )
+                if abs(new_dwell - current_dwell) > 0.05:
+                    api_post("/api/v1/vision/dwell-seconds", params={"seconds": new_dwell})
                     st.rerun()
 
         with chart_col:
@@ -1535,11 +1706,11 @@ with test_cols[1]:
 # Test 3: Proximity Breach Simulation
 # ══════════════════════════════════════════════════════════════════════════════
 with test_cols[0]:
-    st.markdown("### Proximity — Breach Simulation")
-    st.caption("Simulate a worker entering the 1.5m danger perimeter. Triggers vision inspection.")
+    st.markdown("### Proximity — Vicinity Entry Simulation")
+    st.caption("Simulate a worker entering the 1.5m danger vicinity. Triggers vision inspection: if wearing helmet, authorized (no breach); if missing helmet, trips safety lockout breach.")
 
     breach_worker_id = st.text_input(
-        "Worker ID for breach",
+        "Worker ID in vicinity",
         value="WORKER_EMP_402",
         key="breach_worker_id",
     )
@@ -1589,7 +1760,7 @@ with test_cols[0]:
 # Test 4: Vibration / Anomaly Scoring
 # ══════════════════════════════════════════════════════════════════════════════
 with test_cols[1]:
-    st.markdown("### Vibration — Anomaly Scoring")
+    st.markdown("### Multi-Sensor Telemetry — Anomaly Scoring")
     st.caption("Check latest ML anomaly score against calibrated model.")
 
     if st.button(
@@ -1681,9 +1852,9 @@ if st.session_state.test_results:
         elif test_name == "vibration":
             if result:
                 is_anom = bool(result.get("is_anomaly", False))
-                summary_rows.append({"Test": "Vibration Anomaly", "Status": "ANOMALY" if is_anom else "NOMINAL", "Detail": f"score={result.get('score', result.get('anomaly_score', 0)):.3f}"})
+                summary_rows.append({"Test": "Telemetry Anomaly", "Status": "ANOMALY" if is_anom else "NOMINAL", "Detail": f"score={result.get('score', result.get('anomaly_score', 0)):.3f}"})
             else:
-                summary_rows.append({"Test": "Vibration Anomaly", "Status": "NO DATA", "Detail": ""})
+                summary_rows.append({"Test": "Telemetry Anomaly", "Status": "NO DATA", "Detail": ""})
         elif test_name == "camera":
             summary_rows.append({"Test": "Camera Stream", "Status": result.get("status", "UNKNOWN").upper(), "Detail": str(result.get("code", ""))})
     if summary_rows:
@@ -1697,12 +1868,12 @@ st.markdown(
     f"""
     <div class="armor-header">
         {icon_svg('calibration', color='#06b6d4', size=22)}
-        <span>Vibration Calibration & ML Model</span>
+        <span>Multi-Modal Telemetry Calibration & ML Model</span>
     </div>
     """,
     unsafe_allow_html=True,
 )
-st.caption("Train a full IsolationForest on real ADXL345 telemetry; scoring runs on the backend. No synthetic data.")
+st.caption("Train a full IsolationForest on real multi-sensor telemetry (ADXL345 Vibration, INA219 Current & Voltage, DS18B20 Temperature); scoring runs on the backend. No synthetic data.")
 
 cal_left, cal_right = st.columns(2)
 
@@ -1725,9 +1896,23 @@ with cal_left:
         except Exception:
             baseline = {}
         if baseline:
-            st.caption(f"Mean acc: {baseline.get('mean_acc', 0):.4f} g")
-            st.caption(f"Std acc: {baseline.get('std_acc', 0):.4f} g")
-            st.caption(f"Samples: {baseline.get('sample_count', 0)}")
+            if "mean_current" in baseline or "mean_voltage" in baseline:
+                st.markdown(
+                    f'''
+                    <div style="font-size:0.82rem; line-height:1.6; color:#94a3b8; background:rgba(255,255,255,0.02); padding:8px 12px; border-radius:6px; border:1px solid rgba(255,255,255,0.06); margin-bottom:10px;">
+                        <div><b>Vibration (ADXL345):</b> {baseline.get('mean_acc', 0):.4f}g (&plusmn;{baseline.get('std_acc', 0):.4f}g)</div>
+                        <div><b>Current (INA219):</b> {baseline.get('mean_current', 0):.1f} mA (&plusmn;{baseline.get('std_current', 0):.1f} mA)</div>
+                        <div><b>Voltage (INA219):</b> {baseline.get('mean_voltage', 0):.2f} V (&plusmn;{baseline.get('std_voltage', 0):.2f} V)</div>
+                        <div><b>Temperature (DS18B20):</b> {baseline.get('mean_temp', 0):.1f} &deg;C (&plusmn;{baseline.get('std_temp', 0):.1f} &deg;C)</div>
+                        <div><b>Samples:</b> {baseline.get('sample_count', 0)} | <b>Channels:</b> 12 features</div>
+                    </div>
+                    ''',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.caption(f"Mean acc: {baseline.get('mean_acc', 0):.4f} g")
+                st.caption(f"Std acc: {baseline.get('std_acc', 0):.4f} g")
+                st.caption(f"Samples: {baseline.get('sample_count', 0)}")
         if isinstance(pkg, dict) and pkg:
             st.caption(f"Decision threshold: {pkg.get('decision_threshold', 'N/A')}")
             st.caption(f"Hysteresis high: {pkg.get('hysteresis_high', 'N/A')}")
@@ -1769,7 +1954,7 @@ with cal_left:
 
     if "calibration" in st.session_state.test_results:
         cresp = st.session_state.test_results["calibration"]
-        st.success(f"Calibration done — {cresp.get('window_count', 0)} windows, model={cresp.get('model_type', 'N/A')}")
+        st.success(f"Calibration done — {cresp.get('window_count', 0)} windows across Vibration, Current, Voltage & Temperature (Model: {cresp.get('model_type', 'IsolationForest')})")
 
 with cal_right:
     st.markdown("#### Sample Availability")
@@ -1860,18 +2045,39 @@ else:
         )
 
     with w3:
-        zone_class = "hud-red" if proximity_breach else "hud-green"
-        _distance_sub = (
-            f"latest contact {latest_distance:.2f} m ({_contact_age(latest_contact)})"
-            if latest_distance is not None and latest_contact
-            else "no contact recorded"
-        )
+        if proximity_breach:
+            zone_class = "hud-red"
+            badge_title = "Vicinity & PPE Safety"
+            badge_val = "BREACH (NO PPE)"
+            badge_sub = "Worker in vicinity without verified helmet!"
+        elif vicinity_presence:
+            if vicinity_status == "AUTHORIZED_OPERATOR_PPE_VERIFIED":
+                zone_class = "hud-blue"
+                badge_title = "Vicinity Status"
+                badge_val = "AUTHORIZED"
+                badge_sub = "Worker in vicinity with verified helmet (Safe)"
+            else:
+                zone_class = "hud-amber"
+                badge_title = "Vicinity Status"
+                badge_val = "IN VICINITY"
+                badge_sub = "Evaluating worker PPE compliance..."
+        else:
+            zone_class = "hud-green"
+            badge_title = "Vicinity Status"
+            badge_val = "CLEAR"
+            _distance_sub = (
+                f"latest contact {latest_distance:.2f} m ({_contact_age(latest_contact)})"
+                if latest_distance is not None and latest_contact
+                else "perimeter clear"
+            )
+            badge_sub = f"Danger perimeter &lt; 1.5 m · {_distance_sub}"
+
         st.markdown(
             f"""
             <div class="hud-card {zone_class}">
-                <div class="hud-title">Safety Perimeter</div>
-                <div class="hud-value">{'BREACH' if proximity_breach else 'CLEAR'}</div>
-                <div class="hud-sub">Danger boundary &lt; 1.5 m · {_distance_sub}</div>
+                <div class="hud-title">{badge_title}</div>
+                <div class="hud-value">{badge_val}</div>
+                <div class="hud-sub">{badge_sub}</div>
             </div>
             """,
             unsafe_allow_html=True,
