@@ -356,6 +356,19 @@ def video_stream():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 3D Digital Twin (embedded in Streamlit via <iframe>)
+# ----------------------------------------------------------------------------
+@app.get("/twin", tags=["Vision"])
+def digital_twin():
+    """Serve the Three.js digital twin page. Connects to /ws/live via WebSocket."""
+    twin_path = Path(__file__).resolve().parent.parent / "static" / "twin.html"
+    if not twin_path.exists():
+        raise HTTPException(status_code=404, detail="twin.html not found")
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(content=twin_path.read_text(encoding="utf-8"))
+
+
+
 # Health
 # ══════════════════════════════════════════════════════════════════════════════
 @app.get("/api/v1/health", tags=["System"])

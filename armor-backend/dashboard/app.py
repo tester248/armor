@@ -699,24 +699,48 @@ with left_col:
         """,
         unsafe_allow_html=True,
     )
+    view_mode = st.radio(
+        "View Mode",
+        options=["Live Camera", "3D Digital Twin"],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
 
     if backend_online:
-        stream_url = f"{API_BASE_URL}/video/stream"
-        st.markdown(
-            f"""
-            <div class="video-frame-container" style="height: 380px;">
-                <div class="live-badge">● LIVE AI STREAM</div>
-                <iframe 
-                    src="{stream_url}" 
-                    width="100%" 
-                    height="100%" 
-                    style="border:none; display:block; background:#000;"
-                    scrolling="no"
-                ></iframe>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        if view_mode == "Live Camera":
+            stream_url = f"{API_BASE_URL}/video/stream"
+            st.markdown(
+                f"""
+                <div class="video-frame-container" style="height: 380px;">
+                    <div class="live-badge">LIVE AI STREAM</div>
+                    <iframe
+                        src="{stream_url}"
+                        width="100%"
+                        height="100%"
+                        style="border:none; display:block; background:#000;"
+                        scrolling="no"
+                    ></iframe>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            twin_url = f"{API_BASE_URL}/twin?device_id={device_id}"
+            st.markdown(
+                f"""
+                <div class="video-frame-container" style="height: 380px;">
+                    <div class="live-badge" style="background:rgba(6,182,212,0.9);">3D DIGITAL TWIN</div>
+                    <iframe
+                        src="{twin_url}"
+                        width="100%"
+                        height="100%"
+                        style="border:none; display:block; background:#0b0f19;"
+                        scrolling="no"
+                    ></iframe>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
     else:
         st.markdown(
             f"""
@@ -724,14 +748,15 @@ with left_col:
                 <div style="margin-bottom: 12px; opacity: 0.7;">
                     {icon_svg('video', color='#94a3b8', size=44)}
                 </div>
-                <div style="font-weight: 700; font-size: 1.1rem; color: #ffffff;">Camera Stream Offline</div>
+                <div style="font-weight: 700; font-size: 1.1rem; color: #ffffff;">Stream Offline</div>
                 <div style="color: #94a3b8; font-size: 0.85rem; max-width: 380px; margin-top: 6px;">
-                    Start the FastAPI backend server on port 8000 to connect to the live 30fps webcam & helmet segmentation stream.
+                    Start the FastAPI backend on port 8000 to connect.
                 </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
+
 
     st.markdown("<br>", unsafe_allow_html=True)
     btn_col1, btn_col2 = st.columns(2)
