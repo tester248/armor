@@ -83,6 +83,7 @@ volatile float gTempC        = 0.0f;
 
 // Motor state & dual control (Blynk App + Safety Lockout)
 volatile bool blynkMotorRequested = false; // User command from Blynk Switch (V0)
+volatile bool benchTestMode       = true;  // Desk bench test mode: toggle via Blynk Switch (V5) (Default: true)
 volatile bool gInterlock          = false; // Safety lock (MQTT or proximity breach)
 volatile bool motorRunning        = false; // Physical motor output state
 
@@ -194,7 +195,7 @@ void readAxes(float &ax, float &ay, float &az) {
   uint8_t x0 = adxlRead(0x32), x1 = adxlRead(0x33);
   uint8_t y0 = adxlRead(0x34), y1 = adxlRead(0x35);
   uint8_t z0 = adxlRead(0x36), z1 = adxlRead(0x37);
-  const float scale = 0.0039f;  // ADXL345 FULL_RES: 3.9 mg/LSB, output in g
+  const float scale = 0.00390625f;  // ADXL345 FULL_RES: 1/256 = 0.00390625 g/LSB, output in g
   ax = (int16_t)((x1 << 8) | x0) * scale;
   ay = (int16_t)((y1 << 8) | y0) * scale;
   az = (int16_t)((z1 << 8) | z0) * scale;
@@ -377,9 +378,17 @@ BLYNK_WRITE(V0) {
   Serial.printf("[BLYNK] Remote Switch V0: %s\r\n", blynkMotorRequested ? "POWER ON" : "POWER OFF");
 }
 
+BLYNK_WRITE(V5) {
+  int val = param.asInt();
+  benchTestMode = (val == 1);
+  Serial.printf("[BLYNK] Bench Test Mode (V5): %s\r\n",
+                benchTestMode ? "ENABLED (Proximity Lockouts Suppressed)" : "DISABLED (Live Safety Interlocks Active)");
+}
+
 BLYNK_CONNECTED() {
-  Serial.println("[BLYNK] Connected to Blynk Cloud! Syncing V0 state...");
+  Serial.println("[BLYNK] Connected to Blynk Cloud! Syncing V0 and V5 states...");
   Blynk.syncVirtual(V0);
+  Blynk.syncVirtual(V5);
 }
 
 // ---------- MQTT Callbacks ----------
@@ -419,7 +428,8 @@ void ensureMqtt() {
   if (now - lastAttempt < 5000) return;
   lastAttempt = now;
 
-  String clientId = String("armor-node-") + DEVICE_ID;
+  uint64_t chipId = ESP.getEfuseMac();
+  String clientId = String("armor-node-") + DEVICE_ID + "-" + String((uint16_t)chipId, HEX);
   if (mqtt.connect(clientId.c_str())) {
     String topic = String("machinocare/v1/devices/") + DEVICE_ID + "/interlock";
     mqtt.subscribe(topic.c_str(), 1);
@@ -443,6 +453,9 @@ void onEspNowRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len)
   BadgeBeacon beacon;
   memcpy(&beacon, data, sizeof(beacon));
   beacon.badge_id[sizeof(beacon.badge_id) - 1] = '\0';
+
+  // Filter strictly for our Badge ID (hackathon isolation)
+  if (strcmp(beacon.badge_id, "BADGE-EMP-402") != 0) return;
 
   int rssi = (info && info->rx_ctrl) ? info->rx_ctrl->rssi : 0;
   if (!gEmaInit) { gEmaRssi = (float)rssi; gEmaInit = true; }
@@ -490,8 +503,10 @@ void core0Task(void* pv) {
     float acc_mag = sqrtf(ax * ax + ay * ay + az * az);
     computeAnomalyScore(acc_mag, gAnomalyScore, gIsAnomaly);
 
-    gVoltageV  = ina219.getBusVoltage_V();
-    gCurrentMa = ina219.getCurrent_mA();
+    float vBus = ina219.getBusVoltage_V();
+    float cMa  = ina219.getCurrent_mA();
+    if (!isnan(vBus)) gVoltageV  = vBus;
+    if (!isnan(cMa))  gCurrentMa = cMa;
 
     // DS18B20 conversion takes ~750 ms. Request it without blocking and read
     // the result on a later iteration so the 100 Hz sampling loop stays intact.
@@ -532,7 +547,8 @@ void core1Task(void* pv) {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("\r\n[WiFi] Connected to '%s'! IP: %s\r\n", WIFI_SSID, WiFi.localIP().toString().c_str());
+    Serial.printf("\r\n[WiFi] Connected to '%s'! IP: %s | WiFi Ch: %d | MAC: %s\r\n",
+                  WIFI_SSID, WiFi.localIP().toString().c_str(), WiFi.channel(), WiFi.macAddress().c_str());
     // Wall-clock time for telemetry timestamps (UTC).
     configTime(0, 0, "pool.ntp.org", "time.nist.gov");
     Blynk.config(BLYNK_AUTH_TOKEN);
@@ -557,9 +573,10 @@ void core1Task(void* pv) {
   }
 
   mqtt.setServer(MQTT_BROKER, MQTT_PORT);
+  mqtt.setBufferSize(512);   // Expand from default 256 bytes so JSON payload is not silently dropped!
   mqtt.setCallback(mqttCallback);
-  mqtt.setKeepAlive(15);
-  mqtt.setSocketTimeout(2);
+  mqtt.setKeepAlive(60);     // Prevent cloud Blynk latency from triggering MQTT timeout
+  mqtt.setSocketTimeout(3);
 
   uint32_t lastTelemetry = 0;
   uint32_t lastBreachCheck = 0;
@@ -604,11 +621,19 @@ void core1Task(void* pv) {
         snprintf(badgeStr, sizeof(badgeStr), "NOT SEEN");
       }
 
-      Serial.printf("[TELEMETRY] Temp: %4.1f C | Bus: %5.2f V | Current: %5.1f mA | Motor: %-7s | Blynk: %-7s | MQTT: %-9s | Badge: %s\r\n",
-                    gTempC, gVoltageV, gCurrentMa,
+      char mqttStr[48];
+      if (mqtt.connected()) {
+        snprintf(mqttStr, sizeof(mqttStr), "CONNECTED (%s)", MQTT_BROKER);
+      } else {
+        snprintf(mqttStr, sizeof(mqttStr), "OFFLINE (%s)", MQTT_BROKER);
+      }
+
+      Serial.printf("[TELEMETRY] Temp: %4.1f C | Bus: %5.2f V | Current: %5.1f mA | Vib: %5.3f g (CF: %3.1f) | Motor: %-7s | Blynk: %-7s | MQTT: %-25s | Bench: %-3s | Badge: %s\r\n",
+                    gTempC, gVoltageV, gCurrentMa, gRms, gCrestFactor,
                     motorRunning ? "RUNNING" : "STOPPED",
                     Blynk.connected() ? "ONLINE" : "OFFLINE",
-                    mqtt.connected() ? "CONNECTED" : "OFFLINE",
+                    mqttStr,
+                    benchTestMode ? "ON" : "OFF",
                     badgeStr);
 
       // Push Live Telemetry to Blynk Virtual Pins
@@ -623,30 +648,48 @@ void core1Task(void* pv) {
 
       // Publish Telemetry to MQTT
       if (mqtt.connected()) {
+        float v_val = isnan(gVoltageV) ? 0.0f : gVoltageV;
+        float c_val = isnan(gCurrentMa) ? 0.0f : gCurrentMa;
+        float rms_val = isnan(gRms) ? 0.0f : gRms;
+        float temp_val = isnan(gTempC) ? 25.0f : gTempC;
+
         StaticJsonDocument<512> doc;
         doc["device_id"]   = DEVICE_ID;
         time_t epochSec = time(nullptr);
         if (epochSec > 1700000000) {           // NTP synced
           doc["timestamp"] = (uint64_t)epochSec * 1000ULL;
+        } else {
+          doc["timestamp"] = (uint64_t)millis(); // Fallback so timestamp is never absent
         }
         doc["motor_state"] = gInterlock ? "LOCKED" : (motorRunning ? "RUNNING" : "IDLE");
+
+        // Uniform flat schema fields
+        doc["rms"]           = rms_val;
+        doc["voltage_v"]     = v_val;
+        doc["current_ma"]    = c_val;
+        doc["power_mw"]      = v_val * c_val;
+        doc["temperature_c"] = temp_val;
+
+        // Nested objects (for strict schema backend compatibility)
         JsonObject vib = doc.createNestedObject("vibration");
-        vib["rms"]          = gRms;
-        vib["crest_factor"] = gCrestFactor;
+        vib["rms"]          = rms_val;
+        vib["crest_factor"] = isnan(gCrestFactor) ? 0.0f : gCrestFactor;
         JsonObject anom = doc.createNestedObject("anomaly");
         anom["score"]    = gAnomalyScore;
         anom["is_anomaly"] = gIsAnomaly;
         anom["model_ready"] = gAnomalyModelReady;
         JsonObject pwr = doc.createNestedObject("power");
-        pwr["voltage_v"] = gVoltageV;
-        pwr["current_ma"]= gCurrentMa;
-        pwr["power_mw"]  = gVoltageV * gCurrentMa;
-        doc["temperature_c"] = gTempC;
+        pwr["voltage_v"] = v_val;
+        pwr["current_ma"]= c_val;
+        pwr["power_mw"]  = v_val * c_val;
 
         char buf[512];
-        serializeJson(doc, buf);
+        size_t n = serializeJson(doc, buf);
         String topic = String("machinocare/v1/devices/") + DEVICE_ID + "/telemetry";
-        mqtt.publish(topic.c_str(), buf, false);
+        bool ok = mqtt.publish(topic.c_str(), buf, false);
+        if (!ok) {
+          Serial.printf("[MQTT] Publish FAILED! Payload length: %u bytes\r\n", (unsigned int)n);
+        }
       }
     }
 
@@ -696,9 +739,14 @@ void core1Task(void* pv) {
             }
             char buf[512];
             serializeJson(doc, buf);
-            mqtt.publish("machinocare/v1/events/proximity", buf, false);
-            Serial.printf("[SAFETY] Badge %s (%s) at %.2f m (RSSI %.1f)\r\n",
-                          badgeId, macStr, distance, gEmaRssi);
+            if (!benchTestMode) {
+              mqtt.publish("machinocare/v1/events/proximity", buf, false);
+              Serial.printf("[SAFETY] Badge %s (%s) at %.2f m (RSSI %.1f) -> LOCKOUT SENT\r\n",
+                            badgeId, macStr, distance, gEmaRssi);
+            } else {
+              Serial.printf("[BENCH TEST] Badge breach detected: %s at %.2f m (RSSI %.1f) [Lockout suppressed by Blynk V5]\r\n",
+                            badgeId, distance, gEmaRssi);
+            }
           }
         }
       }
@@ -714,6 +762,7 @@ void setup() {
   delay(1000);
   Serial.println("\r\n=======================================================");
   Serial.println("  ARMOR - Machine Node + Blynk IoT Remote Actuation    ");
+  Serial.println("  Blynk Controls: V0 = Motor Switch | V5 = Bench Mode  ");
   Serial.println("=======================================================");
 
   // Relay Pins (Safe initialization: start OFF)
@@ -741,7 +790,8 @@ void setup() {
   if (!initADXL()) {
     Serial.println("[ADXL345] Init FAILED (check wiring)");
   } else {
-    Serial.println("[ADXL345] Init OK");
+    Serial.println("[ADXL345] Init OK: +/-16g Full-Res (0.003906 g/LSB @ 100 Hz Nyquist 50 Hz)");
+    Serial.println("[ADXL345] Expected Baseline: Idle ~0.006g | Warning >0.150g | Critical >0.500g");
   }
 
   // Dual-Core FreeRTOS Tasks
