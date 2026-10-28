@@ -33,25 +33,35 @@ def _now_ms() -> int:
 
 
 def _parse_payload_ts(payload: dict) -> int | None:
+    """Return epoch milliseconds, or None when the payload has no wall clock.
+
+    Small integers are uptime counters (millis()), which cannot be compared
+    against the receiver's clock and must not be reported as latency.
+    """
     ts = payload.get("timestamp")
     if ts is None:
         return None
-    # epoch ms / seconds
     if isinstance(ts, (int, float)):
         v = float(ts)
-        if v < 1e12:  # seconds
-            v *= 1000
-        return int(v)
-    # ISO string
+        if v > 1e12:       # epoch milliseconds
+            return int(v)
+        if v > 1e9:        # epoch seconds
+            return int(v * 1000)
+        return None        # uptime / millis -> not a wall-clock time
     if isinstance(ts, str):
         try:
             dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
             return int(dt.timestamp() * 1000)
         except ValueError:
             try:
-                return int(float(ts) * (1000 if float(ts) < 1e12 else 1))
+                v = float(ts)
             except ValueError:
                 return None
+            if v > 1e12:
+                return int(v)
+            if v > 1e9:
+                return int(v * 1000)
+            return None
     return None
 
 
