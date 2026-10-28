@@ -962,8 +962,11 @@ def issue_interlock(payload: InterlockCommand, device_id: str = Query(default="m
         store.log_interlock(cmd_dict)
 
     elif payload.command == "RESET":
+        # Clearing the interlock does not restart the drive. The firmware only
+        # energises the motor when a START was requested AND no lockout is
+        # active, and LOCKOUT already dropped the request (it writes V0=0).
         store.set_machine_state(device_id, {
-            "motor_state":          "RUNNING",
+            "motor_state":          "IDLE",
             "interlock_active":     False,
             "proximity_breach_active": False,
             "active_worker_id":     None,
