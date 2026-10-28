@@ -261,9 +261,9 @@ void ensureMqtt() {
   if (mqtt.connect(clientId.c_str())) {
     String topic = String("machinocare/v1/devices/") + DEVICE_ID + "/interlock";
     mqtt.subscribe(topic.c_str(), 1);
-    Serial.println("[MQTT] Connected & Subscribed to interlock topic");
+    Serial.printf("[MQTT] Connected to broker %s & Subscribed to interlock topic\r\n", MQTT_BROKER);
   } else {
-    Serial.printf("[MQTT] Connect failed, rc=%d\r\n", mqtt.state());
+    Serial.printf("[MQTT] Connect failed to broker %s, rc=%d\r\n", MQTT_BROKER, mqtt.state());
   }
 }
 
