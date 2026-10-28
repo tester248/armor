@@ -1,0 +1,9 @@
+# Firmware build artifacts
+*.bin
+*.elf
+*.map
+build/
+.pio/
+# OS
+.DS_Store
+Thumbs.db
