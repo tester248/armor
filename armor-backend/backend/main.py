@@ -65,8 +65,11 @@ from backend.ml_engine import (
     score_feature_vector,
     score_with_forest,
     latest_feature_vector,
+    compute_multimodal_baseline_stats,
+    decompose_anomaly,
     FEATURE_ORDER,
 )
+from backend.groq_advisor import generate_predictive_advisory
 
 # ── Config ────────────────────────────────────────────────────────────────────
 MQTT_BROKER   = os.getenv("MQTT_BROKER", "localhost")
@@ -160,25 +163,183 @@ def _score_package(feature_vector: Any, package: dict[str, Any]) -> float | None
     return None
 
 
-def _score_anomaly(device_id: str) -> None:
-    """Score recent telemetry for anomaly if a calibrated model exists."""
+class RollingAnomalyMonitor:
+    """Tracks anomalies across a 5-second sliding window and triggers motor lockdown
+    only when anomalies are sustained above nominal baseline (prevents nuisance trips)."""
+    def __init__(self, window_seconds: float = 5.0, count_threshold: int = 3):
+        self.window_seconds = window_seconds
+        self.threshold = count_threshold
+        self.history: dict[str, list[dict[str, Any]]] = {}
+        self._lock = threading.Lock()
+
+    def record_sample(
+        self,
+        device_id: str,
+        is_anomaly: bool,
+        anomaly_pct: float,
+        contributors: dict[str, Any],
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        t = now or time.time()
+        with self._lock:
+            dev_hist = self.history.setdefault(device_id, [])
+            cutoff = t - self.window_seconds
+            dev_hist = [e for e in dev_hist if e["time"] >= cutoff]
+
+            entry = {
+                "time": t,
+                "is_anomaly": is_anomaly,
+                "anomaly_pct": anomaly_pct,
+                "contributors": contributors,
+            }
+            dev_hist.append(entry)
+            self.history[device_id] = dev_hist
+
+            # Count occurrences in the 5-second window
+            anomaly_count = sum(1 for e in dev_hist if e["is_anomaly"])
+            total_samples = len(dev_hist)
+
+            vib_anom = sum(1 for e in dev_hist if e["is_anomaly"] and e["contributors"].get("vibration", {}).get("status") == "ANOMALOUS")
+            curr_anom = sum(1 for e in dev_hist if e["is_anomaly"] and e["contributors"].get("current", {}).get("status") == "ANOMALOUS")
+            pwr_anom = sum(1 for e in dev_hist if e["is_anomaly"] and e["contributors"].get("voltage_power", {}).get("status") == "ANOMALOUS")
+            temp_anom = sum(1 for e in dev_hist if e["is_anomaly"] and e["contributors"].get("temperature", {}).get("status") == "ANOMALOUS")
+
+            should_lockout = (
+                anomaly_count >= self.threshold or
+                curr_anom >= self.threshold or
+                vib_anom >= self.threshold or
+                temp_anom >= self.threshold
+            )
+
+            primary_driver = "Multi-Modal Sensor Anomaly"
+            if curr_anom >= self.threshold:
+                primary_driver = "Sustained Motor Over-Current Fault"
+            elif vib_anom >= self.threshold:
+                primary_driver = "Sustained Mechanical Vibration Surge"
+            elif temp_anom >= self.threshold:
+                primary_driver = "Sustained Thermal Runaway / Overheating"
+            elif pwr_anom >= self.threshold:
+                primary_driver = "Sustained Electrical Voltage Sag"
+
+            return {
+                "window_seconds": self.window_seconds,
+                "anomaly_count_in_window": anomaly_count,
+                "total_samples_in_window": total_samples,
+                "threshold": self.threshold,
+                "vib_anomalies": vib_anom,
+                "curr_anomalies": curr_anom,
+                "temp_anomalies": temp_anom,
+                "pwr_anomalies": pwr_anom,
+                "should_lockout": should_lockout,
+                "primary_driver": primary_driver,
+            }
+
+    def get_stats(self, device_id: str) -> dict[str, Any]:
+        with self._lock:
+            dev_hist = self.history.get(device_id, [])
+            cutoff = time.time() - self.window_seconds
+            dev_hist = [e for e in dev_hist if e["time"] >= cutoff]
+            anomaly_count = sum(1 for e in dev_hist if e["is_anomaly"])
+            return {
+                "window_seconds": self.window_seconds,
+                "anomaly_count_in_window": anomaly_count,
+                "total_samples_in_window": len(dev_hist),
+                "threshold": self.threshold,
+            }
+
+
+rolling_anomaly_monitor = RollingAnomalyMonitor(
+    window_seconds=float(os.getenv("ANOMALY_WINDOW_SECONDS", "5.0")),
+    count_threshold=int(os.getenv("ANOMALY_LOCKDOWN_THRESHOLD", "3")),
+)
+_latest_decomp: dict[str, Any] = {}
+
+
+def _score_anomaly(device_id: str) -> dict[str, Any] | None:
+    """Score telemetry, decompose into % and weights, check 5s window, and trigger predictive lockout."""
+    global _latest_decomp
     try:
         package = _load_model_package(device_id)
         if package is None:
-            return
+            return None
         recent = store.get_recent_samples_for_ml(device_id, limit=50)
         fv = latest_feature_vector(recent, window_size=25)
         if fv is None:
-            return
-        score = _score_package(fv, package)
-        if score is None:
-            return
-        high = float(package.get("hysteresis_high", package.get("decision_threshold", 0.0)))
-        is_anom = score >= high
-        store.record_anomaly("machino_node_01", device_id, score, high, is_anom)
-        store.set_machine_state(device_id, {"is_anomaly": is_anom})
+            return None
+        raw_score = _score_package(fv, package)
+        if raw_score is None:
+            return None
+
+        # 1. Full multi-modal decomposition (percentage, weights, per-parameter subscores)
+        decomp = decompose_anomaly(fv, package, raw_score=raw_score)
+        _latest_decomp[device_id] = decomp
+
+        # 2. 5-Second Sliding Window Persistence Tracker
+        window_res = rolling_anomaly_monitor.record_sample(
+            device_id=device_id,
+            is_anomaly=decomp["is_anomaly"],
+            anomaly_pct=decomp["anomaly_percentage"],
+            contributors=decomp["modalities"],
+        )
+
+        # 3. Sustained Anomaly Lockdown Trigger
+        if window_res["should_lockout"]:
+            try:
+                curr_state = store.get_machine_state(device_id)
+                if not curr_state.get("interlock_active"):
+                    print(
+                        f"[Predictive Maintenance] LOCKDOWN TRIGGERED! {window_res['anomaly_count_in_window']} "
+                        f"anomalies in 5s window. Driver: {window_res['primary_driver']}."
+                    )
+                    lockout_cmd = {
+                        "command": "LOCKOUT",
+                        "source": "PREDICTIVE_MAINTENANCE_ANOMALY_GATE",
+                        "reason": f"SUSTAINED_ANOMALY_LOCKOUT: {window_res['primary_driver']}",
+                        "anomaly_score": raw_score,
+                        "anomaly_percentage": decomp["anomaly_percentage"],
+                        "window_count": window_res["anomaly_count_in_window"],
+                        "timestamp": _utc_now(),
+                    }
+                    store.log_interlock({**lockout_cmd, "device_id": device_id})
+                    store.set_machine_state(device_id, {
+                        "motor_state": "LOCKED",
+                        "interlock_active": True,
+                        "lockout_reason": lockout_cmd["reason"],
+                    })
+                    _mqtt_publish(
+                        topic=f"machinocare/v1/devices/{device_id}/interlock",
+                        payload=lockout_cmd,
+                    )
+                    _telegram_send(
+                        f"🚨 PREDICTIVE SAFETY MOTOR LOCKDOWN\n"
+                        f"Device  : {device_id}\n"
+                        f"Reason  : {window_res['primary_driver']}\n"
+                        f"Severity: {decomp['anomaly_percentage']}%\n"
+                        f"Window  : {window_res['anomaly_count_in_window']} anomalies in {window_res['window_seconds']}s\n"
+                        f"Action  : Motor emergency power disconnected."
+                    )
+            except Exception as lock_err:
+                print(f"[ML] Predictive lockout error: {lock_err}")
+
+        # 4. Generate Groq LLM predictive advisory
+        last_rec = recent[-1] if recent else {}
+        advisory = generate_predictive_advisory(last_rec, decomp, window_res)
+
+        # 5. Record anomaly in store
+        store.record_anomaly("machino_node_01", device_id, raw_score, decomp["decision_threshold"], decomp["is_anomaly"])
+        store.set_machine_state(device_id, {
+            "is_anomaly": decomp["is_anomaly"],
+            "anomaly_score": raw_score,
+            "anomaly_percentage": decomp["anomaly_percentage"],
+            "top_contributor": decomp["top_contributor"],
+            "anomaly_window_count": window_res["anomaly_count_in_window"],
+            "anomaly_window_threshold": window_res["threshold"],
+            "predictive_advisory": advisory.get("prediction_text"),
+        })
+        return decomp
     except Exception as e:
         print(f"[ML] Anomaly scoring failed: {e}")
+        return None
 
 
 def _telemetry_timestamp(value: Any) -> str:
@@ -261,27 +422,38 @@ def _handle_telemetry_message(payload: dict[str, Any]) -> None:
 
 
 def _handle_breach_message(payload: dict[str, Any]) -> None:
-    """
-    Process proximity breach event from machinocare/v1/events/proximity topic.
-    Sequence (from ARMOR MD sequence diagram):
-      1. Log breach event
-      2. Update machine state (breach active)
-      3. Trigger Vision AI inspection
-      4. If FAIL → create incident, issue LOCKOUT, send Telegram alert
-      5. If PASS → update status green / COMPLIANT
+    """Process vicinity presence event from machinocare/v1/events/proximity topic.
+
+    Safety Architecture:
+      1. When a person is detected in vicinity -> Log vicinity presence event.
+      2. Set vicinity presence active (informational, NOT a breach yet).
+      3. Trigger Vision AI inspection with person dwell countdown.
+      4. IF COMPLIANT (wearing helmet):
+           - Operator is authorized with verified PPE!
+           - Machine stays RUNNING. NO breach or lockout occurs.
+           - Status = AUTHORIZED_OPERATOR_PPE_VERIFIED.
+      5. IF NON-COMPLIANT (missing helmet):
+           - A true SAFETY BREACH occurs (worker in vicinity without PPE gear).
+           - Issue emergency LOCKOUT to machine node.
+           - Record incident as VICINITY_BREACH_MISSING_PPE.
+           - Dispatch urgent Telegram alert with snapshot.
     """
     device_id = payload.get("device_id", "machino_node_01")
     worker_id = payload.get("worker_id", "UNKNOWN")
     badge_mac  = payload.get("badge_mac", "")
 
-    # 1. Log raw breach
+    # 1. Log vicinity entry
     store.insert_breach_event(payload)
 
-    # 2. Mark breach active
+    # 2. Mark vicinity presence active (NOT a breach yet!)
     store.set_machine_state(device_id, {
-        "proximity_breach_active": True,
-        "active_worker_id": worker_id,
+        "vicinity_presence_active": True,
+        "vicinity_status":          "PRESENCE_DETECTED",
+        "proximity_breach_active":  False,  # Not a breach yet! Only a breach if missing PPE!
+        "active_worker_id":         worker_id,
     })
+
+    print(f"[Safety Gate] Person detected in machine vicinity ({worker_id} / {badge_mac}). Evaluating PPE...")
 
     # 3. Vision AI inspection
     result = vision_engine.inspect(worker_id=worker_id, device_id=device_id)
@@ -289,25 +461,25 @@ def _handle_breach_message(payload: dict[str, Any]) -> None:
     snapshot  = result.get("snapshot_path")
 
     if compliant is None:
-        # Vision unavailable (no Roboflow credentials / no model).
-        # Do NOT invent a verdict and do NOT lock the machine on a guess.
         print(
             f"[Vision] Inspection unavailable for {worker_id} "
-            f"({result.get('label')}); interlock decision skipped."
+            f"({result.get('label')}); operator verified in vicinity, interlock skipped."
         )
         store.set_machine_state(device_id, {
-            "proximity_breach_active": True,
-            "active_worker_id": worker_id,
+            "vicinity_presence_active": True,
+            "vicinity_status":          "VICINITY_OCCUPIED_UNCHECKED",
+            "proximity_breach_active":  False,
+            "active_worker_id":         worker_id,
         })
         return
 
     if not compliant:
-        # 4a. Helmet violation → LOCKOUT pipeline
+        # 4a. Worker is in vicinity WITHOUT helmet -> SAFETY BREACH OCCURS!
         incident_id = store.create_incident({
             "device_id":        device_id,
             "worker_id":        worker_id,
             "badge_mac":        badge_mac,
-            "violation_type":   "MISSING_HELMET",
+            "violation_type":   "VICINITY_BREACH_MISSING_PPE",
             "compliance_ratio": result["compliance_ratio"],
             "snapshot_path":    snapshot,
             "interlock_issued": True,
@@ -315,15 +487,19 @@ def _handle_breach_message(payload: dict[str, Any]) -> None:
 
         lockout_cmd = {
             "command":   "LOCKOUT",
-            "source":    "VISION_AI_PIPELINE",
-            "reason":    "MISSING_HELMET_SEGMENTATION_VIOLATION",
+            "source":    "VISION_AI_SAFETY_GATE",
+            "reason":    "SAFETY_BREACH_UNPROTECTED_WORKER_IN_VICINITY",
             "worker_id": worker_id,
             "timestamp": _utc_now(),
         }
         store.log_interlock({**lockout_cmd, "device_id": device_id})
         store.set_machine_state(device_id, {
-            "motor_state":     "LOCKED",
-            "interlock_active": True,
+            "motor_state":             "LOCKED",
+            "interlock_active":         True,
+            "vicinity_presence_active": True,
+            "vicinity_status":          "SAFETY_BREACH_MISSING_PPE",
+            "proximity_breach_active":  True,  # Now marked as active breach
+            "active_worker_id":         worker_id,
         })
 
         # Publish LOCKOUT to machine node via MQTT
@@ -334,23 +510,28 @@ def _handle_breach_message(payload: dict[str, Any]) -> None:
 
         # Telegram alert with snapshot
         alert_text = (
-            f"🚨 ARMOR SAFETY VIOLATION\n"
+            f"🚨 ARMOR SAFETY BREACH / VIOLATION\n"
             f"Device : {device_id}\n"
             f"Worker : {worker_id}  |  Badge: {badge_mac}\n"
-            f"Helmet compliance ratio: {result['compliance_ratio']:.0%}\n"
-            f"⚡ Motor LOCKED OUT automatically.\n"
-            f"Incident ID: {incident_id}"
+            f"Status : PERSON IN MACHINE VICINITY WITHOUT PPE!\n"
+            f"Verdict: Helmet NOT detected (Ratio: {result['compliance_ratio']:.0%})\n"
+            f"Action : Automatic Motor Power LOCKOUT Executed.\n"
+            f"Incident #{incident_id}"
         )
         _telegram_send(alert_text, photo_path=snapshot)
 
     else:
-        # 4b. Compliant — update status green
+        # 4b. Worker is wearing helmet -> AUTHORIZED! NO BREACH!
         store.set_machine_state(device_id, {
-            "motor_state":          "RUNNING",
-            "interlock_active":     False,
-            "proximity_breach_active": True,
-            "active_worker_id":     worker_id,
+            "motor_state":              "RUNNING",
+            "interlock_active":         False,
+            "vicinity_presence_active": True,
+            "vicinity_status":          "AUTHORIZED_OPERATOR_PPE_VERIFIED",
+            "proximity_breach_active":  False,  # NOT a breach!
+            "active_worker_id":         worker_id,
+            "worker_compliant":         True,
         })
+        print(f"[Safety Gate] Worker {worker_id} in vicinity with verified PPE helmet. Authorized operation (NO breach).")
 
 
 def _mqtt_publish(topic: str, payload: dict[str, Any]) -> None:
@@ -557,6 +738,24 @@ def vision_set_auto_freeze(enabled: bool = True):
     return {"status": "ok", "auto_freeze_enabled": enabled}
 
 
+@app.get("/api/v1/vision/dwell-seconds", tags=["Vision"])
+def vision_get_dwell_seconds():
+    """Get the current dwell duration required before freeze is triggered."""
+    if vision_engine is None:
+        raise HTTPException(status_code=503, detail="Vision engine not available.")
+    state = vision_engine.get_state()
+    return {"person_dwell_seconds": state.get("dwell_required", 2.0)}
+
+
+@app.post("/api/v1/vision/dwell-seconds", tags=["Vision"])
+def vision_set_dwell_seconds(seconds: float = Query(2.0, ge=0.5, le=10.0)):
+    """Set how many seconds a person must be detected continuously before triggering helmet check."""
+    if vision_engine is None:
+        raise HTTPException(status_code=503, detail="Vision engine not available.")
+    vision_engine.set_dwell_seconds(seconds)
+    return {"status": "ok", "person_dwell_seconds": seconds}
+
+
 # Health
 # ══════════════════════════════════════════════════════════════════════════════
 @app.get("/api/v1/health", tags=["System"])
@@ -753,11 +952,19 @@ def get_status(device_id: str):
         "interlock_active":         bool(state.get("interlock_active", False)),
         "last_telemetry_at":        state.get("last_telemetry_at"),
         "is_anomaly":               bool(state.get("is_anomaly", False)),
+        "anomaly_score":            state.get("anomaly_score", 0.0),
+        "anomaly_percentage":       state.get("anomaly_percentage", 0.0),
+        "top_contributor":          state.get("top_contributor", "none"),
+        "anomaly_window_count":     state.get("anomaly_window_count", 0),
+        "anomaly_window_threshold": state.get("anomaly_window_threshold", 3),
+        "predictive_advisory":       state.get("predictive_advisory"),
         "current_rms":              state.get("current_rms"),
         "current_voltage_v":        state.get("current_voltage_v"),
         "current_ma":               state.get("current_ma"),
         "current_temp_c":           state.get("current_temp_c"),
         "active_worker_id":         state.get("active_worker_id"),
+        "vicinity_presence_active": bool(state.get("vicinity_presence_active", False)),
+        "vicinity_status":          state.get("vicinity_status", "NOMINAL"),
         "proximity_breach_active":  bool(state.get("proximity_breach_active", False)),
         "server_timestamp":         _utc_now(),
     }
@@ -859,12 +1066,7 @@ def calibrate(device_id: str = Query(default="machino_node_01"), contamination: 
         model_path=model_path,
     )
 
-    acc_vals = [s["acc_mag"] for s in samples]
-    baseline = {
-        "mean_acc": float(np.mean(acc_vals)) if acc_vals else 0.0,
-        "std_acc": float(np.std(acc_vals)) if acc_vals else 0.0,
-        "sample_count": len(samples),
-    }
+    baseline = compute_multimodal_baseline_stats(samples)
 
     store.save_model_package(
         machine_id="machino_node_01",
@@ -881,6 +1083,9 @@ def calibrate(device_id: str = Query(default="machino_node_01"), contamination: 
         "model_type": package.get("model_type"),
         "window_count": package.get("window_count"),
         "train_score_p95": package.get("train_score_p95"),
+        "feature_order": package.get("feature_order"),
+        "baseline_stats": baseline,
+        "modalities": ["vibration", "current", "voltage", "temperature"],
         "model_package": package,
     }
 
@@ -912,6 +1117,47 @@ def list_anomalies(
     """List recent anomaly events."""
     anomalies = store.get_recent_anomalies("machino_node_01", device_id, hours=hours, limit=limit)
     return {"count": len(anomalies), "anomalies": anomalies}
+
+
+@app.get("/api/v1/telemetry/anomaly/decomposition/{device_id}", tags=["Calibration"])
+def get_anomaly_decomposition(device_id: str):
+    """Returns real-time anomaly percentage, modality weights, and per-parameter breakdown."""
+    if device_id in _latest_decomp:
+        return _latest_decomp[device_id]
+    package = _load_model_package(device_id)
+    if package is None:
+        raise HTTPException(status_code=404, detail="No calibrated model package found.")
+    recent = store.get_recent_samples_for_ml(device_id, limit=50)
+    fv = latest_feature_vector(recent, window_size=25)
+    if fv is None:
+        raise HTTPException(status_code=400, detail="Insufficient telemetry samples for decomposition.")
+    decomp = decompose_anomaly(fv, package)
+    _latest_decomp[device_id] = decomp
+    return decomp
+
+
+@app.get("/api/v1/telemetry/prediction/{device_id}", tags=["Calibration"])
+def get_predictive_advisory(device_id: str, force: bool = False):
+    """Returns Groq LLM predictive advisory and window persistence statistics."""
+    recent = store.get_recent_samples_for_ml(device_id, limit=50)
+    last_rec = recent[-1] if recent else {}
+    decomp = _latest_decomp.get(device_id)
+    if not decomp:
+        package = _load_model_package(device_id)
+        if package:
+            fv = latest_feature_vector(recent, window_size=25)
+            if fv is not None:
+                decomp = decompose_anomaly(fv, package)
+    if not decomp:
+        decomp = {"anomaly_percentage": 0.0, "is_anomaly": False, "modalities": {}}
+    stats = rolling_anomaly_monitor.get_stats(device_id)
+    advisory = generate_predictive_advisory(last_rec, decomp, stats, force_refresh=force)
+    return {
+        "device_id": device_id,
+        "advisory": advisory,
+        "window_stats": stats,
+        "timestamp": _utc_now(),
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -960,8 +1206,16 @@ async def ws_live(websocket: WebSocket):
                 "device_id": device_id,
                 "motor_state": state.get("motor_state", "UNKNOWN"),
                 "interlock_active": bool(state.get("interlock_active", False)),
+                "vicinity_presence_active": bool(state.get("vicinity_presence_active", False)),
+                "vicinity_status": state.get("vicinity_status", "NOMINAL"),
                 "proximity_breach_active": bool(state.get("proximity_breach_active", False)),
                 "active_worker_id": state.get("active_worker_id"),
+                "is_anomaly": bool(state.get("is_anomaly", False)),
+                "anomaly_percentage": state.get("anomaly_percentage", 0.0),
+                "anomaly_score": state.get("anomaly_score", 0.0),
+                "top_contributor": state.get("top_contributor"),
+                "anomaly_window_count": state.get("anomaly_window_count", 0),
+                "predictive_advisory": state.get("predictive_advisory"),
                 "current_rms": state.get("current_rms"),
                 "current_temp_c": state.get("current_temp_c"),
                 "current_ma": state.get("current_ma"),
