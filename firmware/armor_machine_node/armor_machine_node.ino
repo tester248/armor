@@ -293,6 +293,9 @@ void onEspNowRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len)
   memcpy(&beacon, data, sizeof(beacon));
   beacon.badge_id[sizeof(beacon.badge_id) - 1] = '\0';
 
+  // Filter strictly for our Badge ID (hackathon isolation)
+  if (strcmp(beacon.badge_id, "BADGE-EMP-402") != 0) return;
+
   int rssi = (info && info->rx_ctrl) ? info->rx_ctrl->rssi : 0;
   if (!gEmaInit) { gEmaRssi = (float)rssi; gEmaInit = true; }
   else            { gEmaRssi = EMA_ALPHA * rssi + (1.0f - EMA_ALPHA) * gEmaRssi; }
@@ -379,7 +382,8 @@ void core1Task(void* pv) {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("\r\n[WiFi] Connected to '%s'! IP: %s\r\n", WIFI_SSID, WiFi.localIP().toString().c_str());
+    Serial.printf("\r\n[WiFi] Connected to '%s'! IP: %s | WiFi Ch: %d | MAC: %s\r\n",
+                  WIFI_SSID, WiFi.localIP().toString().c_str(), WiFi.channel(), WiFi.macAddress().c_str());
     // Wall-clock time for telemetry timestamps (UTC).
     configTime(0, 0, "pool.ntp.org", "time.nist.gov");
     Blynk.config(BLYNK_AUTH_TOKEN);
