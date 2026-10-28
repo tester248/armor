@@ -24,7 +24,7 @@ $backend = Start-Process -FilePath "python" `
 $env:ARMOR_API_URL = "http://127.0.0.1:$backendPort"
 $dashboard = Start-Process -FilePath "python" `
     -ArgumentList "-m","streamlit","run","dashboard/app.py","--server.port",$dashboardPort,"--server.headless","true" `
-    -WorkingDirectory $BackendDir -PassThru -Environment @{ ARMOR_API_URL = "http://127.0.0.1:$backendPort" }
+    -WorkingDirectory $BackendDir -PassThru
 
 @{ backend = $backend.Id; dashboard = $dashboard.Id; backend_port = $backendPort; dashboard_port = $dashboardPort } |
     ConvertTo-Json | Set-Content -Path $PidFile -Encoding utf8
