@@ -92,6 +92,7 @@ ROBOFLOW_BACKOFF_BASE_S = float(os.getenv("ROBOFLOW_BACKOFF_BASE_S", "0.8"))
 # Timing configuration
 FREEZE_HOLD_DURATION_S = float(os.getenv("FREEZE_HOLD_DURATION_S", "4.0"))
 AUTO_INSPECT_COOLDOWN_S = float(os.getenv("AUTO_INSPECT_COOLDOWN_S", "4.0"))
+PERSON_DWELL_SECONDS = float(os.getenv("PERSON_DWELL_SECONDS", "2.0"))
 AUTO_FREEZE_DEFAULT = os.getenv("AUTO_FREEZE_ENABLED", "false").lower() in ("true", "1", "yes")
 
 
@@ -644,6 +645,10 @@ class VisionEngine:
         self._vision_state = "SCANNING"  # SCANNING | FROZEN_INSPECTING | HELMET_PASS | HELMET_FAIL | COOLDOWN
         self._auto_freeze_enabled = AUTO_FREEZE_DEFAULT
         self._person_inspected_for_current_presence = False
+        self._person_dwell_seconds = PERSON_DWELL_SECONDS
+        self._dwell_first_seen = 0.0
+        self._dwell_elapsed = 0.0
+        self._dwell_progress = 0.0
 
         self._person_detector = PersonDetector()
         self._person_present = False
@@ -754,11 +759,37 @@ class VisionEngine:
                         and not self._is_inspecting
                         and now >= self._cooldown_until
                     ):
-                        self._person_inspected_for_current_presence = True
-                        self._trigger_freeze_and_inspect(
-                            frame.copy(), person_boxes, worker_id="WORKER_EMP_402", device_id="machino_node_01"
-                        )
+                        if self._dwell_first_seen <= 0.0:
+                            self._dwell_first_seen = now
+                        dwell_elapsed = now - self._dwell_first_seen
+                        dwell_prog = min(1.0, dwell_elapsed / max(0.1, self._person_dwell_seconds))
+                        with self._person_lock:
+                            self._dwell_elapsed = dwell_elapsed
+                            self._dwell_progress = dwell_prog
+
+                        # Wait until person has been detected continuously for the full dwell duration
+                        if dwell_elapsed >= self._person_dwell_seconds:
+                            self._dwell_first_seen = 0.0
+                            with self._person_lock:
+                                self._dwell_elapsed = 0.0
+                                self._dwell_progress = 0.0
+                            self._person_inspected_for_current_presence = True
+                            self._trigger_freeze_and_inspect(
+                                frame.copy(), person_boxes, worker_id="WORKER_EMP_402", device_id="machino_node_01"
+                            )
+                    else:
+                        self._dwell_first_seen = 0.0
+                        with self._person_lock:
+                            self._dwell_elapsed = 0.0
+                            self._dwell_progress = 0.0
                 else:
+                    # Reset dwell timer if person leaves the frame
+                    if (now - last_person_seen_time) > 0.4:
+                        self._dwell_first_seen = 0.0
+                        with self._person_lock:
+                            self._dwell_elapsed = 0.0
+                            self._dwell_progress = 0.0
+
                     # Reset gate only after camera has seen NO person for at least 2 seconds
                     if (now - last_person_seen_time) >= 2.0:
                         self._person_inspected_for_current_presence = False
@@ -972,19 +1003,44 @@ class VisionEngine:
                     with self._person_lock:
                         person_present = self._person_present
                         boxes = list(self._person_boxes)
+                        dwell_prog = self._dwell_progress
+                        dwell_elapsed = self._dwell_elapsed
 
                         if person_present:
+                            is_dwelling = 0.0 < dwell_prog < 1.0
                             for (x1, y1, x2, y2) in boxes:
-                                cv2.rectangle(stream_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                                cv2.putText(
-                                    stream_frame,
-                                    "PERSON",
-                                    (x1, max(y1 - 8, 20)),
-                                    cv2.FONT_HERSHEY_SIMPLEX,
-                                    0.55,
-                                    (0, 255, 0),
-                                    2,
-                                )
+                                box_color = (0, 200, 255) if is_dwelling else (0, 255, 0)
+                                cv2.rectangle(stream_frame, (x1, y1), (x2, y2), box_color, 2)
+
+                                if is_dwelling:
+                                    # Render dwell countdown & progress bar directly above the person box
+                                    bw = max(20, x2 - x1)
+                                    bar_y1 = max(0, y1 - 18)
+                                    bar_y2 = max(0, y1 - 8)
+                                    cv2.rectangle(stream_frame, (x1, bar_y1), (x1 + bw, bar_y2), (40, 40, 40), -1)
+                                    fill_w = int(bw * dwell_prog)
+                                    cv2.rectangle(stream_frame, (x1, bar_y1), (x1 + fill_w, bar_y2), (0, 220, 255), -1)
+
+                                    dwell_txt = f"HOLD STILL: {dwell_elapsed:.1f}s / {self._person_dwell_seconds:.1f}s"
+                                    cv2.putText(
+                                        stream_frame,
+                                        dwell_txt,
+                                        (x1, max(y1 - 24, 20)),
+                                        cv2.FONT_HERSHEY_SIMPLEX,
+                                        0.50,
+                                        (0, 220, 255),
+                                        2,
+                                    )
+                                else:
+                                    cv2.putText(
+                                        stream_frame,
+                                        "PERSON",
+                                        (x1, max(y1 - 8, 20)),
+                                        cv2.FONT_HERSHEY_SIMPLEX,
+                                        0.55,
+                                        (0, 255, 0),
+                                        2,
+                                    )
                     cv2.circle(stream_frame, (20, 25), 6, (0, 255, 0), -1)
                     cv2.putText(
                         stream_frame,
@@ -1051,6 +1107,8 @@ class VisionEngine:
         with self._person_lock:
             person_present = self._person_present
             person_boxes = list(self._person_boxes)
+            dwell_elapsed = self._dwell_elapsed
+            dwell_prog = self._dwell_progress
         with self._frame_lock:
             is_frozen = self._is_frozen
             vision_state = self._vision_state
@@ -1065,6 +1123,10 @@ class VisionEngine:
             "auto_freeze_enabled": self._auto_freeze_enabled,
             "last_helmet_result": last_result,
             "roboflow_available": self._roboflow_available,
+            "dwell_elapsed": round(dwell_elapsed, 2),
+            "dwell_progress": round(dwell_prog, 2),
+            "dwell_required": self._person_dwell_seconds,
+            "is_dwelling": 0.0 < dwell_prog < 1.0,
         }
 
     def set_auto_freeze(self, enabled: bool) -> None:
@@ -1077,6 +1139,11 @@ class VisionEngine:
             if self._is_frozen:
                 self.unfreeze()
             print("[VisionEngine] Auto-freeze helmet detection DISABLED (continuous live stream).")
+
+    def set_dwell_seconds(self, seconds: float) -> None:
+        """Configures the required dwell time before person triggers freeze."""
+        self._person_dwell_seconds = max(0.5, float(seconds))
+        print(f"[VisionEngine] Person dwell duration configured to {self._person_dwell_seconds:.1f}s.")
 
     # ── Backwards-Compatible Aliases ──────────────────────────────────────────
     def start_inspection(self, worker_id: str = "WORKER_EMP_402", device_id: str = "machino_node_01") -> dict[str, Any]:
