@@ -52,5 +52,5 @@ cd armor-backend
 
 ## Git workflow
 
-`main` (demo-ready) ← `dev` (integration) ← short-lived `feat/*`, `chore/*`, `fix/*` branches.
+Short-lived feature branches (`feat/*`, `chore/*`, `fix/*`) branch off `main` and merge back into `main` when done and tested. `main` stays demo-ready.
 Never commit `.env`, `data/`, or `.venv/`.
