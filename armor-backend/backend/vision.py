@@ -41,6 +41,9 @@ try:
 except ValueError:
     pass  # keep as string path (video file)
 
+# Optional capture backend override: any | dshow | msmf (Windows).
+CAMERA_BACKEND = os.getenv("CAMERA_BACKEND", "any").strip().lower()
+
 HELMET_COMPLIANCE_THRESHOLD = float(
     os.getenv("HELMET_COMPLIANCE_THRESHOLD", "0.65")
 )
@@ -349,7 +352,12 @@ class VisionEngine:
 
     # ── Capture loop (background thread) ──────────────────────────────────────
     def _capture_loop(self) -> None:
-        self._cap = cv2.VideoCapture(CAMERA_SOURCE)
+        backend_map = {"dshow": cv2.CAP_DSHOW, "msmf": cv2.CAP_MSMF, "any": cv2.CAP_ANY}
+        backend = backend_map.get(CAMERA_BACKEND, cv2.CAP_ANY)
+        self._cap = cv2.VideoCapture(CAMERA_SOURCE, backend)
+        if not self._cap.isOpened() and backend != cv2.CAP_ANY:
+            # fall back to default backend
+            self._cap = cv2.VideoCapture(CAMERA_SOURCE)
         if not self._cap.isOpened():
             print("[VisionEngine] WARNING: Camera not available. Generating blank frames.")
 
