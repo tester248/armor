@@ -1,4 +1,4 @@
-const API_BASE = process.env.EXPO_PUBLIC_ARMOR_API_URL || 'http://10.0.2.2:8000';
+const API_BASE = process.env.EXPO_PUBLIC_ARMOR_API_URL || 'http://10.24.103.187:8000';
 
 async function req(path: string, init?: RequestInit) {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -68,6 +68,6 @@ export const api = {
 export const DEFAULT_DEVICE_ID = 'machino_node_01';
 
 // WebSocket URL for live telemetry push
-export const WS_BASE = (process.env.EXPO_PUBLIC_ARMOR_API_URL || 'http://10.0.2.2:8000')
+export const WS_BASE = (process.env.EXPO_PUBLIC_ARMOR_API_URL || 'http://10.24.103.187:8000')
   .replace('http://', 'ws://')
   .replace('https://', 'wss://');
