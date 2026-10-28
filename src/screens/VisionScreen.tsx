@@ -71,7 +71,7 @@ export default function VisionScreen() {
   return (
     <View style={styles.container}>
       {/* Live Camera Feed */}
-      <Card style={styles.card} mode="elevated">
+      <Card style={styles.card} mode="contained">
         <Card.Title title="Live Camera" left={(p) => <Icon {...p} source="video" />} />
         <Card.Content>
           <View style={styles.feedContainer}>
@@ -86,7 +86,7 @@ export default function VisionScreen() {
       </Card>
 
       {/* Helmet Inspection Controls */}
-      <Card style={styles.card} mode="elevated">
+      <Card style={styles.card} mode="contained">
         <Card.Title title="Helmet Inspection" left={(p) => <Icon {...p} source="shield-search" />} />
         <Card.Content>
           <Button
@@ -124,7 +124,7 @@ export default function VisionScreen() {
                 Compliance: {(result.compliance_ratio * 100).toFixed(1)}%
               </Text>
               <Text style={styles.resultText}>
-                Worker: {result.worker_id} | {result.timestamp?.slice(0, 19)}
+                Worker: {result.worker_id} | {(result.timestamp || '').slice(0, 19)}
               </Text>
               {snapshotUrl && (
                 <View style={styles.snapshotContainer}>

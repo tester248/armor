@@ -38,7 +38,7 @@ export default function InterlockScreen() {
   return (
     <View style={styles.container}>
       {/* Motor Control */}
-      <Card style={styles.card} mode="elevated">
+      <Card style={styles.card} mode="contained">
         <Card.Title title="Motor Control" left={(p) => <Icon {...p} source="engine" />} />
         <Card.Content>
           <Text style={{ marginBottom: SPACING.md, color: STATUS.MUTED }}>
@@ -78,7 +78,7 @@ export default function InterlockScreen() {
       </Card>
 
       {/* Bench Test Mode (replaces Blynk V5) */}
-      <Card style={styles.card} mode="elevated">
+      <Card style={styles.card} mode="contained">
         <Card.Title title="Bench Test Mode" left={(p) => <Icon {...p} source="bug" />} />
         <Card.Content>
           <Text style={{ marginBottom: SPACING.sm, color: STATUS.MUTED }}>

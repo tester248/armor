@@ -47,9 +47,9 @@ export default function IncidentsScreen() {
       {incidents.length === 0 && <Text style={styles.muted}>No incidents recorded.</Text>}
 
       {incidents.map((inc) => (
-        <Card key={inc.incident_id} style={styles.card} mode="elevated">
+        <Card key={inc.incident_id} style={styles.card} mode="contained">
           <Card.Title
-            title={`Incident ${inc.incident_id.slice(0, 8)}`}
+            title={`Incident ${(inc.incident_id || '').slice(0, 8)}`}
             subtitle={inc.worker_id || 'UNKNOWN'}
             left={(p) => <Icon {...p} source="clipboard-alert" />}
           />
@@ -74,7 +74,7 @@ export default function IncidentsScreen() {
                 {inc.resolved ? 'Resolved' : 'OPEN'}
               </Chip>
             </View>
-            <Text style={styles.time}>{inc.created_at?.slice(0, 19).replace('T', ' ')}</Text>
+            <Text style={styles.time}>{(inc.created_at || '').slice(0, 19).replace('T', ' ')}</Text>
           </Card.Content>
           {!inc.resolved && (
             <Card.Actions>

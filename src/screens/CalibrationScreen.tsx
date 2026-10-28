@@ -62,7 +62,7 @@ export default function CalibrationScreen() {
       {msg && <Text style={styles.msg}>{msg}</Text>}
 
       {/* Model Status */}
-      <Card style={styles.card} mode="elevated">
+      <Card style={styles.card} mode="contained">
         <Card.Title title="Model Status" left={(p) => <Icon {...p} source="brain" />} />
         <Card.Content>
           <View style={styles.row}>
@@ -118,7 +118,7 @@ export default function CalibrationScreen() {
       </Card>
 
       {/* Sample Availability */}
-      <Card style={styles.card} mode="elevated">
+      <Card style={styles.card} mode="contained">
         <Card.Title title="Sample Availability" left={(p) => <Icon {...p} source="database" />} />
         <Card.Content>
           <View style={styles.row}>
@@ -137,7 +137,7 @@ export default function CalibrationScreen() {
       </Card>
 
       {/* Run Calibration */}
-      <Card style={styles.card} mode="elevated">
+      <Card style={styles.card} mode="contained">
         <Card.Title title="Run Calibration" left={(p) => <Icon {...p} source="tune" />} />
         <Card.Content>
           <Text style={{ marginBottom: SPACING.sm, color: STATUS.MUTED }}>
@@ -173,7 +173,7 @@ export default function CalibrationScreen() {
       </Card>
 
       {/* Recent Anomalies */}
-      <Card style={styles.card} mode="elevated">
+      <Card style={styles.card} mode="contained">
         <Card.Title title="Recent Anomalies" left={(p) => <Icon {...p} source="alert-circle" />} />
         <Card.Content>
           {anomalies.length === 0 && <Text style={styles.muted}>No anomaly records yet. Run calibration first.</Text>}

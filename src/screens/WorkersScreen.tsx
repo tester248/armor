@@ -80,7 +80,7 @@ export default function WorkersScreen() {
       </Button>
 
       {showRegister && (
-        <Card style={styles.card} mode="elevated">
+        <Card style={styles.card} mode="contained">
           <Card.Title title="Register Badge" />
           <Card.Content>
             <TextInput label="Badge MAC (e.g. 24:6F:28:AB:C1:02)" value={newMac} onChangeText={setNewMac} style={styles.input} />
@@ -96,7 +96,7 @@ export default function WorkersScreen() {
       {workers.length === 0 && <Text style={styles.muted}>No badges registered.</Text>}
 
       {workers.map((w) => (
-        <Card key={w.badge_mac} style={styles.card} mode="elevated">
+        <Card key={w.badge_mac} style={styles.card} mode="contained">
           <Card.Title title={w.worker_id} subtitle={w.worker_name || 'Operator'} />
           <Card.Content>
             <View style={styles.row}>

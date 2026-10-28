@@ -55,7 +55,7 @@ export default function DashboardScreen() {
 
       {/* Machine Status Card */}
       {status && (
-        <Card style={styles.card} mode="elevated">
+        <Card style={styles.card} mode="contained">
           <Card.Title
             title="Machine Status"
             left={(p) => <Icon {...p} source="engine" />}
@@ -99,7 +99,7 @@ export default function DashboardScreen() {
 
       {/* Sensor Readings Card */}
       {status && (
-        <Card style={styles.card} mode="elevated">
+        <Card style={styles.card} mode="contained">
           <Card.Title title="Sensor Readings" left={(p) => <Icon {...p} source="gauge" />} />
           <Card.Content>
             <View style={styles.row}>
@@ -124,7 +124,7 @@ export default function DashboardScreen() {
       )}
 
       {/* Recent Samples Card */}
-      <Card style={styles.card} mode="elevated">
+      <Card style={styles.card} mode="contained">
         <Card.Title title="Recent Samples" left={(p) => <Icon {...p} source="chart-line" />} />
         <Card.Content>
           {telemetry.length === 0 && <Text style={styles.muted}>No telemetry yet.</Text>}
