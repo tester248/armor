@@ -119,6 +119,10 @@ def _telegram_send(text: str, photo_path: str | None = None) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 _mqtt_client = None
 
+# Ring buffer of recent raw MQTT messages (for debug utility)
+_mqtt_ring: list[dict[str, Any]] = []
+_MQTT_RING_MAX = 200
+
 
 def _score_anomaly(device_id: str) -> None:
     """Score recent telemetry for anomaly if a calibrated model exists."""
@@ -272,7 +276,16 @@ def _start_mqtt() -> None:
             try:
                 payload = json.loads(msg.payload.decode())
             except Exception:
-                return
+                payload = {"_raw": msg.payload.decode(errors="replace")}
+
+            # Capture into debug ring buffer
+            _mqtt_ring.append({
+                "topic": msg.topic,
+                "payload": payload,
+                "received_at": _utc_now(),
+            })
+            if len(_mqtt_ring) > _MQTT_RING_MAX:
+                del _mqtt_ring[: len(_mqtt_ring) - _MQTT_RING_MAX]
 
             topic = msg.topic
             if topic.endswith("/telemetry"):
@@ -358,6 +371,17 @@ def health():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ============================================================================
+# Debug: recent raw MQTT messages (ring buffer)
+# ============================================================================
+@app.get("/api/v1/debug/mqtt", tags=["Debug"])
+def debug_mqtt(limit: int = Query(default=50, ge=1, le=200)):
+    """Return the most recent raw MQTT messages received from the ESP."""
+    recent = _mqtt_ring[-limit:]
+    return {"count": len(recent), "messages": recent}
+
+
+
 # Telemetry  (HTTP fallback — ESP32 can also POST directly if MQTT unavailable)
 # ══════════════════════════════════════════════════════════════════════════════
 @app.post("/api/v1/telemetry", status_code=202, tags=["Telemetry"])
