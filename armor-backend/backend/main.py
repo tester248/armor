@@ -126,10 +126,28 @@ _mqtt_ring: list[dict[str, Any]] = []
 _MQTT_RING_MAX = 200
 
 
+def _load_model_package(device_id: str) -> dict[str, Any] | None:
+    """Return the trained package dict for a device.
+
+    calibrations.model_package is stored as JSON text, so the raw row is not
+    usable by score_feature_vector(); it needs the parsed dict.
+    """
+    record = store.get_model_package("machino_node_01", device_id)
+    if not record:
+        return None
+    package = record.get("model_package")
+    if isinstance(package, str):
+        try:
+            package = json.loads(package)
+        except (ValueError, TypeError):
+            return None
+    return package if isinstance(package, dict) else None
+
+
 def _score_anomaly(device_id: str) -> None:
     """Score recent telemetry for anomaly if a calibrated model exists."""
     try:
-        package = store.get_model_package("machino_node_01", device_id)
+        package = _load_model_package(device_id)
         if package is None:
             return
         recent = store.get_recent_samples_for_ml(device_id, limit=50)
@@ -542,7 +560,7 @@ def ingest_telemetry(payload: TelemetryIngestRequest):
 
     # Predictive maintenance: score anomaly if a calibrated model exists
     try:
-        package = store.get_model_package("machino_node_01", payload.device_id)
+        package = _load_model_package(payload.device_id)
         if package is not None:
             recent = store.get_recent_samples_for_ml(payload.device_id, limit=50)
             fv = latest_feature_vector(recent, window_size=25)
