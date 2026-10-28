@@ -164,3 +164,4 @@ def generate_predictive_advisory(
     with _CACHE_LOCK:
         _PREDICTION_CACHE = res
     return res
+

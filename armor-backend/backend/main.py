@@ -145,7 +145,17 @@ def _load_model_package(device_id: str) -> dict[str, Any] | None:
             package = json.loads(package)
         except (ValueError, TypeError):
             return None
-    return package if isinstance(package, dict) else None
+    if isinstance(package, dict):
+        if "baseline_stats" not in package and record.get("baseline_stats"):
+            b_stats = record.get("baseline_stats")
+            if isinstance(b_stats, str):
+                try:
+                    b_stats = json.loads(b_stats)
+                except Exception:
+                    pass
+            package["baseline_stats"] = b_stats
+        return package
+    return None
 
 
 def _score_package(feature_vector: Any, package: dict[str, Any]) -> float | None:
@@ -260,18 +270,31 @@ def _score_anomaly(device_id: str) -> dict[str, Any] | None:
     global _latest_decomp
     try:
         package = _load_model_package(device_id)
-        if package is None:
-            return None
         recent = store.get_recent_samples_for_ml(device_id, limit=50)
-        fv = latest_feature_vector(recent, window_size=25)
-        if fv is None:
-            return None
-        raw_score = _score_package(fv, package)
-        if raw_score is None:
+        if not recent:
             return None
 
-        # 1. Full multi-modal decomposition (percentage, weights, per-parameter subscores)
-        decomp = decompose_anomaly(fv, package, raw_score=raw_score)
+        # Auto-initialize calibration package if missing or feature dimension mismatched
+        if package is None or len(package.get("feature_means", [])) != len(FEATURE_ORDER):
+            if len(recent) >= 20:
+                print(f"[ML] Auto-calibrating 12-feature baseline for {device_id}...")
+                f_mat = build_feature_matrix(recent, window_size=10)
+                model_path = Path(ARMOR_DB).parent / "models" / f"{device_id}.joblib"
+                package = train_isolation_forest(f_mat, contamination=0.05, model_path=model_path)
+                baseline = compute_multimodal_baseline_stats(recent)
+                store.save_model_package("machino_node_01", device_id, package, baseline, None, package.get("window_count"))
+
+        fv = latest_feature_vector(recent, window_size=10)
+        if fv is None:
+            fv = extract_feature_vector([recent[-1]])
+
+        raw_score = None
+        if package:
+            raw_score = _score_package(fv, package)
+
+        # 1. Full multi-modal decomposition with instantaneous single-parameter spike detection
+        latest_sample = recent[-1] if recent else None
+        decomp = decompose_anomaly(fv, package or {}, latest_sample=latest_sample, raw_score=raw_score)
         _latest_decomp[device_id] = decomp
 
         # 2. 5-Second Sliding Window Persistence Tracker
@@ -295,7 +318,7 @@ def _score_anomaly(device_id: str) -> dict[str, Any] | None:
                         "command": "LOCKOUT",
                         "source": "PREDICTIVE_MAINTENANCE_ANOMALY_GATE",
                         "reason": f"SUSTAINED_ANOMALY_LOCKOUT: {window_res['primary_driver']}",
-                        "anomaly_score": raw_score,
+                        "anomaly_score": decomp["anomaly_score"],
                         "anomaly_percentage": decomp["anomaly_percentage"],
                         "window_count": window_res["anomaly_count_in_window"],
                         "timestamp": _utc_now(),
@@ -322,14 +345,13 @@ def _score_anomaly(device_id: str) -> dict[str, Any] | None:
                 print(f"[ML] Predictive lockout error: {lock_err}")
 
         # 4. Generate Groq LLM predictive advisory
-        last_rec = recent[-1] if recent else {}
-        advisory = generate_predictive_advisory(last_rec, decomp, window_res)
+        advisory = generate_predictive_advisory(latest_sample or {}, decomp, window_res)
 
         # 5. Record anomaly in store
-        store.record_anomaly("machino_node_01", device_id, raw_score, decomp["decision_threshold"], decomp["is_anomaly"])
+        store.record_anomaly("machino_node_01", device_id, decomp["anomaly_score"], decomp["decision_threshold"], decomp["is_anomaly"])
         store.set_machine_state(device_id, {
             "is_anomaly": decomp["is_anomaly"],
-            "anomaly_score": raw_score,
+            "anomaly_score": decomp["anomaly_score"],
             "anomaly_percentage": decomp["anomaly_percentage"],
             "top_contributor": decomp["top_contributor"],
             "anomaly_window_count": window_res["anomaly_count_in_window"],
@@ -1125,13 +1147,10 @@ def get_anomaly_decomposition(device_id: str):
     if device_id in _latest_decomp:
         return _latest_decomp[device_id]
     package = _load_model_package(device_id)
-    if package is None:
-        raise HTTPException(status_code=404, detail="No calibrated model package found.")
     recent = store.get_recent_samples_for_ml(device_id, limit=50)
-    fv = latest_feature_vector(recent, window_size=25)
-    if fv is None:
-        raise HTTPException(status_code=400, detail="Insufficient telemetry samples for decomposition.")
-    decomp = decompose_anomaly(fv, package)
+    fv = latest_feature_vector(recent, window_size=10) if recent else None
+    latest_sample = recent[-1] if recent else None
+    decomp = decompose_anomaly(fv or np.zeros(len(FEATURE_ORDER)), package or {}, latest_sample=latest_sample)
     _latest_decomp[device_id] = decomp
     return decomp
 

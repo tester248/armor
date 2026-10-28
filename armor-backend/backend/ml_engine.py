@@ -357,28 +357,38 @@ def compute_multimodal_baseline_stats(samples: Sequence[Mapping[str, Any]]) -> d
         return {
             "mean_acc": 0.0,
             "std_acc": 0.0,
+            "mean_crest": 1.41,
+            "std_crest": 0.2,
             "mean_current": 0.0,
             "std_current": 0.0,
-            "mean_voltage": 0.0,
+            "mean_voltage": 12.0,
             "std_voltage": 0.0,
-            "mean_temp": 0.0,
+            "mean_power": 0.0,
+            "std_power": 0.0,
+            "mean_temp": 30.0,
             "std_temp": 0.0,
             "sample_count": 0,
             "modalities": ["vibration", "current", "voltage", "temperature"],
         }
 
-    acc = np.array([float(s.get("acc_mag") or 0.0) for s in samples], dtype=float)
-    curr = np.array([float(s.get("current_ma") or 0.0) for s in samples], dtype=float)
-    volt = np.array([float(s.get("voltage_v") or 0.0) for s in samples], dtype=float)
-    temp = np.array([float(s.get("temperature_c") or 0.0) for s in samples], dtype=float)
+    acc = np.array([float(s.get("acc_mag", s.get("rms", 0.0)) or 0.0) for s in samples], dtype=float)
+    crest = np.array([float(s.get("crest_factor", 1.41) or 1.41) for s in samples], dtype=float)
+    curr = np.array([float(s.get("current_ma", 0.0) or 0.0) for s in samples], dtype=float)
+    volt = np.array([float(s.get("voltage_v", 12.0) or 12.0) for s in samples], dtype=float)
+    pwr = np.array([float(s.get("power_mw", 0.0) or (float(s.get("voltage_v", 12.0) or 12.0) * float(s.get("current_ma", 0.0) or 0.0))) for s in samples], dtype=float)
+    temp = np.array([float(s.get("temperature_c", 30.0) or 30.0) for s in samples], dtype=float)
 
     return {
         "mean_acc": round(float(np.mean(acc)), 4),
         "std_acc": round(float(np.std(acc)), 4),
+        "mean_crest": round(float(np.mean(crest)), 2),
+        "std_crest": round(float(np.std(crest)), 2),
         "mean_current": round(float(np.mean(curr)), 2),
         "std_current": round(float(np.std(curr)), 2),
         "mean_voltage": round(float(np.mean(volt)), 2),
         "std_voltage": round(float(np.std(volt)), 2),
+        "mean_power": round(float(np.mean(pwr)), 2),
+        "std_power": round(float(np.std(pwr)), 2),
         "mean_temp": round(float(np.mean(temp)), 2),
         "std_temp": round(float(np.std(temp)), 2),
         "sample_count": len(samples),
@@ -407,110 +417,156 @@ def build_checksum(payload: Mapping[str, object]) -> str:
 def decompose_anomaly(
     feature_vector: np.ndarray,
     package: Mapping[str, Any],
+    latest_sample: Mapping[str, Any] | None = None,
     raw_score: float | None = None,
 ) -> dict[str, Any]:
-    """Decomposes the anomaly score into:
+    """Decomposes telemetry into:
       1. Calibrated Anomaly Percentage (0% to 100%)
-      2. Sensor Modality Weightages (Vibration, Current, Voltage/Power, Temperature)
-      3. Parameter-level deviations (sigma), sub-scores, and status
-      4. Top contributing failure mode
+      2. Per-parameter deviation (sigma) from learned baseline (vibration, current, voltage, temp)
+      3. Sensor Modality Weightages summing to 100%
+      4. Single-parameter spike anomaly detection (triggers if ANY single parameter spikes!)
+      5. Top contributing failure mode
     """
     fv = np.asarray(feature_vector, dtype=float).reshape(-1)
     means = np.asarray(package.get("feature_means", []), dtype=float)
     stds = np.asarray(package.get("feature_stds", []), dtype=float)
     stds = np.where(stds < 1e-6, 1.0, stds)
-    order = list(package.get("feature_order", FEATURE_ORDER))
     threshold = float(package.get("hysteresis_high", package.get("decision_threshold", 0.0)))
 
-    # Compute raw score if not passed
-    if raw_score is None:
+    # Parse baseline_stats if stored in package
+    baseline = package.get("baseline_stats")
+    if isinstance(baseline, str):
+        try:
+            baseline = json.loads(baseline)
+        except Exception:
+            baseline = {}
+    if not isinstance(baseline, dict):
+        baseline = {}
+
+    import math
+
+    # 1. Vibration (ADXL345)
+    vib_cur = float(latest_sample.get("rms", latest_sample.get("acc_mag", fv[0] if len(fv) > 0 else 0.0))) if latest_sample else float(fv[0] if len(fv) > 0 else 0.0)
+    vib_peak = float(fv[2] if len(fv) > 2 else vib_cur)
+    vib_cf = float(latest_sample.get("crest_factor", fv[3] if len(fv) > 3 else 1.41)) if latest_sample else float(fv[3] if len(fv) > 3 else 1.41)
+    vib_mean = float(baseline.get("mean_acc", means[0] if len(means) > 0 else 0.035))
+    vib_std = float(baseline.get("std_acc", stds[0] if len(stds) > 0 else 0.015))
+    vib_floor = min(max(vib_std, 0.015), 0.04)
+    
+    # Directional deviation: vibration only triggers on excess surge
+    z_vib_cur = (vib_cur - vib_mean) / vib_floor if vib_cur > vib_mean else 0.0
+    z_vib_peak = (vib_peak - vib_mean) / vib_floor if vib_peak > vib_mean else 0.0
+    z_vib_mag = max(z_vib_cur, z_vib_peak)
+    if vib_cur >= 0.15:
+        z_vib_mag = max(z_vib_mag, 3.0 + (vib_cur - 0.15) / 0.05)
+    z_cf = (vib_cf - float(baseline.get("mean_crest", 1.8))) / max(float(baseline.get("std_crest", 0.4)), 0.4) if vib_cf > float(baseline.get("mean_crest", 1.8)) else 0.0
+    z_vib = max(z_vib_mag, z_cf * 0.7)
+
+    # 2. Current (INA219) - handles extra power load immediately
+    curr_cur = float(latest_sample.get("current_ma", fv[4] if len(fv) > 4 else 0.0)) if latest_sample else float(fv[4] if len(fv) > 4 else 0.0)
+    curr_peak = float(fv[6] if len(fv) > 6 else curr_cur)
+    curr_mean = float(baseline.get("mean_current", means[4] if len(means) > 4 else 0.0))
+    curr_std = float(baseline.get("std_current", stds[4] if len(stds) > 4 else 10.0))
+    curr_floor = min(max(curr_std, 20.0), 40.0)
+    
+    # Directional deviation: current only triggers on excess draw (idle 0mA is NOT an anomaly!)
+    z_curr_cur = (curr_cur - curr_mean) / curr_floor if curr_cur > curr_mean else 0.0
+    z_curr_peak = (curr_peak - curr_mean) / curr_floor if curr_peak > curr_mean else 0.0
+    z_curr_base = max(z_curr_cur, z_curr_peak)
+    if curr_cur >= 280.0:
+        z_curr_base = max(z_curr_base, 3.5 + (curr_cur - 280.0) / 25.0)
+
+    # 3. Voltage & Power (INA219)
+    volt_cur = float(latest_sample.get("voltage_v", fv[7] if len(fv) > 7 else 12.0)) if latest_sample else float(fv[7] if len(fv) > 7 else 12.0)
+    z_volt = (10.5 - volt_cur) / 0.5 if volt_cur < 10.5 else ((volt_cur - 13.8) / 0.5 if volt_cur > 13.8 else 0.0)
+
+    pwr_cur = float(latest_sample.get("power_mw", fv[9] if len(fv) > 9 else (volt_cur * curr_cur))) if latest_sample else float(fv[9] if len(fv) > 9 else 0.0)
+    pwr_mean = float(baseline.get("mean_power", means[9] if len(means) > 9 else (12.0 * curr_mean)))
+    pwr_std = float(baseline.get("std_power", stds[9] if len(stds) > 9 else 250.0))
+    pwr_floor = min(max(pwr_std, 500.0), 800.0)
+    z_pwr = (pwr_cur - pwr_mean) / pwr_floor if pwr_cur > pwr_mean else 0.0
+    
+    # Motor power surge is driven by current draw:
+    z_curr = max(z_curr_base, z_pwr)
+    z_volt_pwr = max(z_volt, z_pwr * 0.5)
+
+    # 4. Temperature (DS18B20)
+    temp_cur = float(latest_sample.get("temperature_c", fv[10] if len(fv) > 10 else 30.0)) if latest_sample else float(fv[10] if len(fv) > 10 else 30.0)
+    temp_mean = float(baseline.get("mean_temp", means[10] if len(means) > 10 else 30.0))
+    temp_std = float(baseline.get("std_temp", stds[10] if len(stds) > 10 else 0.5))
+    temp_floor = min(max(temp_std, 1.5), 3.5)
+    z_temp = (temp_cur - temp_mean) / temp_floor if temp_cur > temp_mean else 0.0
+    if temp_cur >= 50.0:
+        z_temp = max(z_temp, 3.5 + (temp_cur - 50.0) / 2.0)
+
+    # Per-Parameter Spike Detection:
+    # If ANY single parameter spikes >= 2.5 sigma, anomaly is IMMEDIATELY detected!
+    z_max = max(z_curr, z_vib, z_volt_pwr, z_temp)
+    is_spike_anomaly = bool(z_max >= 2.5)
+
+    if is_spike_anomaly:
+        spike_score = round(0.04 + (z_max - 2.5) * 0.025, 4)
+        if z_max >= 4.0:
+            spike_pct = min(99.0, round(75.0 + (z_max - 4.0) * 4.0, 1))
+        else:
+            spike_pct = round(55.0 + (z_max - 2.5) * 13.0, 1)
+    elif z_max >= 1.8:
+        spike_score = round((z_max - 2.5) * 0.015, 4)
+        spike_pct = round(30.0 + (z_max - 1.8) * 35.0, 1)
+    else:
+        spike_score = round(-0.06 - (1.8 - z_max) * 0.04, 4)
+        spike_pct = max(1.0, round(z_max * 14.0, 1))
+
+    # Evaluate Forest Score if available and valid
+    if raw_score is None and package:
         model_path = package.get("model_path")
         if model_path:
-            raw_score = score_with_forest(fv, model_path) or 0.0
-        elif "weights" in package and "bias" in package:
-            raw_score = score_feature_vector(fv, package)
-        else:
-            raw_score = 0.0
+            raw_score = score_with_forest(fv, model_path)
 
-    # 1. Calibrated Anomaly Percentage (0% to 100%)
-    # Uses a logistic scaling centered around the decision threshold
-    k = 14.0
-    import math
-    try:
-        anomaly_pct = 100.0 / (1.0 + math.exp(-k * (raw_score - threshold)))
-    except OverflowError:
-        anomaly_pct = 100.0 if raw_score > threshold else 0.0
-    anomaly_pct = round(max(1.0, min(99.9, anomaly_pct)), 1)
-    is_anomaly = bool(raw_score >= threshold)
-
-    # 2. Individual Feature Deviations (z-scores)
-    n_feat = min(len(fv), len(means), len(stds), len(order))
-    feat_z: dict[str, float] = {}
-    feat_val: dict[str, float] = {}
-    feat_mean: dict[str, float] = {}
-    feat_std: dict[str, float] = {}
-
-    for i in range(n_feat):
-        name = order[i]
-        val = float(fv[i])
-        m = float(means[i])
-        s = float(stds[i])
-        z = abs(val - m) / s
-        feat_z[name] = z
-        feat_val[name] = val
-        feat_mean[name] = m
-        feat_std[name] = s
-
-    # 3. Group by physical modalities
-    # Modality 1: Vibration (ADXL345)
-    vib_keys = ["mean_acc_mag", "std_acc_mag", "max_acc_mag", "crest_factor"]
-    vib_z_sum = sum(feat_z.get(k, 0.0) for k in vib_keys)
-    vib_z_max = max([feat_z.get(k, 0.0) for k in vib_keys] or [0.0])
-
-    # Modality 2: Current (INA219)
-    curr_keys = ["mean_current_ma", "std_current_ma", "max_current_ma"]
-    curr_z_sum = sum(feat_z.get(k, 0.0) for k in curr_keys)
-    curr_z_max = max([feat_z.get(k, 0.0) for k in curr_keys] or [0.0])
-
-    # Modality 3: Voltage & Power (INA219)
-    volt_keys = ["mean_voltage_v", "std_voltage_v", "mean_power_mw"]
-    volt_z_sum = sum(feat_z.get(k, 0.0) for k in volt_keys)
-    volt_z_max = max([feat_z.get(k, 0.0) for k in volt_keys] or [0.0])
-
-    # Modality 4: Temperature (DS18B20)
-    temp_keys = ["mean_temp_c", "max_temp_c"]
-    temp_z_sum = sum(feat_z.get(k, 0.0) for k in temp_keys)
-    temp_z_max = max([feat_z.get(k, 0.0) for k in temp_keys] or [0.0])
-
-    total_z_sum = vib_z_sum + curr_z_sum + volt_z_sum + temp_z_sum
-    if total_z_sum < 1e-4:
-        vib_w = curr_w = volt_w = temp_w = 25.0
+    if raw_score is not None:
+        final_score = round(max(float(raw_score), spike_score), 4)
+        is_anomaly = bool(is_spike_anomaly or raw_score >= threshold)
     else:
-        vib_w = round((vib_z_sum / total_z_sum) * 100.0, 1)
-        curr_w = round((curr_z_sum / total_z_sum) * 100.0, 1)
-        volt_w = round((volt_z_sum / total_z_sum) * 100.0, 1)
-        temp_w = round(max(0.0, 100.0 - (vib_w + curr_w + volt_w)), 1)
+        final_score = spike_score
+        is_anomaly = is_spike_anomaly
 
-    def _z_to_subscore(z: float) -> tuple[float, str]:
-        # Subscore %: maps z-deviation to 0-100%
+    anomaly_pct = spike_pct if not is_anomaly else max(spike_pct, 55.0)
+    anomaly_pct = round(max(1.0, min(99.9, anomaly_pct)), 1)
+
+    # Sub-scores per modality
+    def _to_subscore(z: float) -> tuple[float, str]:
         sub = 100.0 / (1.0 + math.exp(-1.5 * (z - 2.5)))
         sub = round(max(2.0, min(99.0, sub)), 1)
-        if sub >= 70.0:
-            status = "ANOMALOUS"
-        elif sub >= 40.0:
-            status = "ELEVATED"
+        if z >= 2.5:
+            st = "ANOMALOUS"
+        elif z >= 1.8:
+            st = "ELEVATED"
         else:
-            status = "NOMINAL"
-        return sub, status
+            st = "NOMINAL"
+        return sub, st
 
-    vib_sub, vib_status = _z_to_subscore(vib_z_max)
-    curr_sub, curr_status = _z_to_subscore(curr_z_max)
-    volt_sub, volt_status = _z_to_subscore(volt_z_max)
-    temp_sub, temp_status = _z_to_subscore(temp_z_max)
+    vib_sub, vib_status = _to_subscore(z_vib)
+    curr_sub, curr_status = _to_subscore(z_curr)
+    volt_sub, volt_status = _to_subscore(z_volt_pwr)
+    temp_sub, temp_status = _to_subscore(z_temp)
 
-    # Determine top contributor
-    z_map = {"Vibration": vib_z_sum, "Motor Current": curr_z_sum, "Voltage & Power": volt_z_sum, "Temperature": temp_z_sum}
-    top_contributor = max(z_map, key=z_map.get)
+    # Modality weightages summing to 100%
+    total_z = z_vib + z_curr + z_volt_pwr + z_temp + 1e-4
+    vib_w = round((z_vib / total_z) * 100.0, 1)
+    curr_w = round((z_curr / total_z) * 100.0, 1)
+    volt_w = round((z_volt_pwr / total_z) * 100.0, 1)
+    temp_w = max(0.0, round(100.0 - (vib_w + curr_w + volt_w), 1))
+
+    # Primary failure driver
+    z_dict = {
+        "Motor Current (INA219)": z_curr,
+        "Vibration (ADXL345)": z_vib,
+        "Voltage & Power (INA219)": z_volt_pwr,
+        "Temperature (DS18B20)": z_temp,
+    }
+    top_contributor = max(z_dict, key=z_dict.get)
+    if z_max < 1.8 and not is_anomaly:
+        top_contributor = "Multi-Modal Sensor Array (Nominal)"
 
     modalities = {
         "vibration": {
@@ -520,16 +576,16 @@ def decompose_anomaly(
             "status": vib_status,
             "channels": {
                 "rms_g": {
-                    "value": round(feat_val.get("mean_acc_mag", 0.0), 4),
-                    "nominal_mean": round(feat_mean.get("mean_acc_mag", 0.0), 4),
-                    "nominal_std": round(feat_std.get("mean_acc_mag", 0.0), 4),
-                    "deviation_sigma": round(feat_z.get("mean_acc_mag", 0.0), 2),
+                    "value": round(vib_cur, 4),
+                    "nominal_mean": round(vib_mean, 4),
+                    "nominal_std": round(vib_std, 4),
+                    "deviation_sigma": round(z_vib_mag, 2),
                 },
                 "crest_factor": {
-                    "value": round(feat_val.get("crest_factor", 0.0), 2),
-                    "nominal_mean": round(feat_mean.get("crest_factor", 0.0), 2),
-                    "nominal_std": round(feat_std.get("crest_factor", 0.0), 2),
-                    "deviation_sigma": round(feat_z.get("crest_factor", 0.0), 2),
+                    "value": round(vib_cf, 2),
+                    "nominal_mean": round(float(baseline.get("mean_crest", 1.8)), 2),
+                    "nominal_std": round(float(baseline.get("std_crest", 0.4)), 2),
+                    "deviation_sigma": round(z_cf, 2),
                 },
             },
         },
@@ -540,16 +596,16 @@ def decompose_anomaly(
             "status": curr_status,
             "channels": {
                 "mean_current_ma": {
-                    "value": round(feat_val.get("mean_current_ma", 0.0), 1),
-                    "nominal_mean": round(feat_mean.get("mean_current_ma", 0.0), 1),
-                    "nominal_std": round(feat_std.get("mean_current_ma", 0.0), 1),
-                    "deviation_sigma": round(feat_z.get("mean_current_ma", 0.0), 2),
+                    "value": round(curr_cur, 1),
+                    "nominal_mean": round(curr_mean, 1),
+                    "nominal_std": round(curr_std, 1),
+                    "deviation_sigma": round(z_curr, 2),
                 },
                 "peak_current_ma": {
-                    "value": round(feat_val.get("max_current_ma", 0.0), 1),
-                    "nominal_mean": round(feat_mean.get("max_current_ma", 0.0), 1),
-                    "nominal_std": round(feat_std.get("max_current_ma", 0.0), 1),
-                    "deviation_sigma": round(feat_z.get("max_current_ma", 0.0), 2),
+                    "value": round(curr_peak, 1),
+                    "nominal_mean": round(curr_mean, 1),
+                    "nominal_std": round(curr_std, 1),
+                    "deviation_sigma": round(z_curr, 2),
                 },
             },
         },
@@ -560,16 +616,16 @@ def decompose_anomaly(
             "status": volt_status,
             "channels": {
                 "voltage_v": {
-                    "value": round(feat_val.get("mean_voltage_v", 0.0), 2),
-                    "nominal_mean": round(feat_mean.get("mean_voltage_v", 0.0), 2),
-                    "nominal_std": round(feat_std.get("mean_voltage_v", 0.0), 2),
-                    "deviation_sigma": round(feat_z.get("mean_voltage_v", 0.0), 2),
+                    "value": round(volt_cur, 2),
+                    "nominal_mean": round(float(baseline.get("mean_voltage", 12.0)), 2),
+                    "nominal_std": round(float(baseline.get("std_voltage", 0.1)), 2),
+                    "deviation_sigma": round(z_volt, 2),
                 },
                 "power_mw": {
-                    "value": round(feat_val.get("mean_power_mw", 0.0), 1),
-                    "nominal_mean": round(feat_mean.get("mean_power_mw", 0.0), 1),
-                    "nominal_std": round(feat_std.get("mean_power_mw", 0.0), 1),
-                    "deviation_sigma": round(feat_z.get("mean_power_mw", 0.0), 2),
+                    "value": round(pwr_cur, 1),
+                    "nominal_mean": round(pwr_mean, 1),
+                    "nominal_std": round(pwr_std, 1),
+                    "deviation_sigma": round(z_pwr, 2),
                 },
             },
         },
@@ -580,17 +636,17 @@ def decompose_anomaly(
             "status": temp_status,
             "channels": {
                 "temperature_c": {
-                    "value": round(feat_val.get("mean_temp_c", 0.0), 1),
-                    "nominal_mean": round(feat_mean.get("mean_temp_c", 0.0), 1),
-                    "nominal_std": round(feat_std.get("mean_temp_c", 0.0), 1),
-                    "deviation_sigma": round(feat_z.get("mean_temp_c", 0.0), 2),
+                    "value": round(temp_cur, 1),
+                    "nominal_mean": round(temp_mean, 1),
+                    "nominal_std": round(temp_std, 1),
+                    "deviation_sigma": round(z_temp, 2),
                 },
             },
         },
     }
 
     return {
-        "anomaly_score": round(float(raw_score), 4),
+        "anomaly_score": round(float(final_score), 4),
         "decision_threshold": round(float(threshold), 4),
         "is_anomaly": is_anomaly,
         "anomaly_percentage": anomaly_pct,

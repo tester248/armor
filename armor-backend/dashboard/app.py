@@ -671,12 +671,14 @@ cf_text = f"{crest_factor:.2f}" if crest_factor is not None else "--"
 
 # ── Live anomaly score (backend scores once per incoming telemetry sample) ──
 latest_anomaly = anomalies[0] if anomalies else None
-anom_score: float | None = None
-anom_threshold: float | None = None
+anom_score: float | None = _reading(status_data.get("anomaly_score"), decomp_data.get("anomaly_score"))
+anom_threshold: float | None = _reading(status_data.get("decision_threshold"), decomp_data.get("decision_threshold", 0.0))
 anom_age_s: float | None = None
-if latest_anomaly:
+if anom_score is None and latest_anomaly:
     anom_score = _reading(latest_anomaly.get("score", latest_anomaly.get("anomaly_score")))
     anom_threshold = _reading(latest_anomaly.get("threshold"))
+
+if latest_anomaly:
     _last_score_dt = _parse_ts(latest_anomaly.get("created_at", latest_anomaly.get("recorded_at")))
     anom_age_s = (datetime.now(timezone.utc) - _last_score_dt).total_seconds() if _last_score_dt else None
 
@@ -1006,7 +1008,7 @@ else:
         _live_pkg = {}
 
     top_contrib = decomp_data.get("top_contributor") or status_data.get("top_contributor") or "Multi-Modal Sensor Array"
-    cur_anomaly_pct = float(decomp_data.get("anomaly_percentage") or anomaly_pct or 0.0)
+    cur_anomaly_pct = float(decomp_data.get("anomaly_percentage") or status_data.get("anomaly_percentage") or anomaly_pct or 0.0)
 
     # Groq AI Predictive Advisory Banner
     st.markdown(
@@ -1948,6 +1950,8 @@ with cal_left:
             if code == 200:
                 st.toast("Calibration complete!", icon=":material/check_circle:")
                 st.session_state.test_results["calibration"] = resp
+                # Trigger immediate re-scoring with new package
+                api_get(f"/api/v1/telemetry/anomaly/decomposition/{device_id}", timeout=2.0)
                 st.rerun()
             else:
                 st.error(f"Calibration failed: {resp.get('detail', resp)}")
