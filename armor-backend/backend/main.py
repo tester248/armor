@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import threading
 import time
@@ -358,14 +359,18 @@ def _start_mqtt() -> None:
                 del _mqtt_ring[: len(_mqtt_ring) - _MQTT_RING_MAX]
 
             topic = msg.topic
-            if topic.endswith("/telemetry"):
-                _handle_telemetry_message(payload)
-            elif topic == "machinocare/v1/events/proximity":
-                threading.Thread(
-                    target=_handle_breach_message,
-                    args=(payload,),
-                    daemon=True,
-                ).start()
+            try:
+                if topic.endswith("/telemetry"):
+                    _handle_telemetry_message(payload)
+                elif topic == "machinocare/v1/events/proximity":
+                    threading.Thread(
+                        target=_handle_breach_message,
+                        args=(payload,),
+                        daemon=True,
+                    ).start()
+            except Exception as e:
+                # Never let a single malformed message kill the MQTT network thread.
+                print(f"[MQTT] Handler failed on {topic}: {e!r}")
 
         client.on_connect = on_connect
         client.on_message = on_message

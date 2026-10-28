@@ -24,21 +24,56 @@ if [[ -f "$PIDFILE" ]]; then
   fi
 fi
 
-# Detect python executable (prefers virtualenv if available)
-PYTHON_EXE="python3"
-if [[ -f "$BACKEND_DIR/.venv/bin/python" ]]; then
-  PYTHON_EXE="$BACKEND_DIR/.venv/bin/python"
-elif [[ -f "$ROOT/.venv/bin/python" ]]; then
-  PYTHON_EXE="$ROOT/.venv/bin/python"
+# Detect a python that actually has the backend dependencies installed.
+PYTHON_EXE=""
+for cand in "$BACKEND_DIR/.venv/bin/python" "$ROOT/.venv/bin/python" "python3" "python"; do
+  if [[ "$cand" != "python3" && "$cand" != "python" && ! -f "$cand" ]]; then
+    continue
+  fi
+  if command -v "$cand" >/dev/null 2>&1 && "$cand" -c "import uvicorn, fastapi, streamlit" >/dev/null 2>&1; then
+    PYTHON_EXE="$cand"
+    break
+  fi
+done
+if [[ -z "$PYTHON_EXE" ]]; then
+  echo "No Python interpreter with ARMOR dependencies found." >&2
+  echo "Install them with: python -m pip install -r armor-backend/requirements.txt" >&2
+  exit 1
 fi
+echo "Using Python: $PYTHON_EXE"
 
 BACKEND_PORT="${BACKEND_PORT:-8000}"
 DASHBOARD_PORT="${DASHBOARD_PORT:-8501}"
 
 cd "$BACKEND_DIR"
-"$PYTHON_EXE" -m uvicorn backend.main:app --host 0.0.0.0 --port "$BACKEND_PORT" &
+"$PYTHON_EXE" -m uvicorn backend.main:app --host 0.0.0.0 --port "$BACKEND_PORT" \
+  > "$ROOT/.run/backend.log" 2>&1 &
 BACKEND_PID=$!
-ARMOR_API_URL="http://127.0.0.1:$BACKEND_PORT" "$PYTHON_EXE" -m streamlit run dashboard/app.py --server.port "$DASHBOARD_PORT" --server.headless true &
+
+READY=0
+for _ in $(seq 1 20); do
+  sleep 0.75
+  if ! kill -0 "$BACKEND_PID" 2>/dev/null; then break; fi
+  if "$PYTHON_EXE" - "$BACKEND_PORT" <<'PY' >/dev/null 2>&1
+import sys, urllib.request
+urllib.request.urlopen(f"http://127.0.0.1:{sys.argv[1]}/api/v1/health", timeout=2)
+PY
+  then
+    READY=1
+    break
+  fi
+done
+
+if [[ "$READY" -ne 1 ]]; then
+  echo "Backend failed to start on port $BACKEND_PORT." >&2
+  echo "--- .run/backend.log ---" >&2
+  tail -n 20 "$ROOT/.run/backend.log" >&2 || true
+  kill "$BACKEND_PID" 2>/dev/null || true
+  exit 1
+fi
+
+ARMOR_API_URL="http://127.0.0.1:$BACKEND_PORT" "$PYTHON_EXE" -m streamlit run dashboard/app.py --server.port "$DASHBOARD_PORT" --server.headless true \
+  > "$ROOT/.run/dashboard.log" 2>&1 &
 DASHBOARD_PID=$!
 
 printf '{"backend":%s,"dashboard":%s,"backend_port":"%s","dashboard_port":"%s"}\n' \
