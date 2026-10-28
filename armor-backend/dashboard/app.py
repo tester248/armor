@@ -1320,20 +1320,20 @@ with test_cols[1]:
     if "vibration" in st.session_state.test_results:
         an = st.session_state.test_results["vibration"]
         if an:
-            score = an.get("anomaly_score", 0.0)
+            score = an.get("score", an.get("anomaly_score", 0.0))
             threshold = an.get("threshold", 0.0)
             is_anom = bool(an.get("is_anomaly", False))
             if is_anom:
                 st.error(f"❌ ANOMALY DETECTED — score {score:.3f} >= threshold {threshold:.3f}")
             else:
                 st.success(f"✅ NOMINAL — score {score:.3f} < threshold {threshold:.3f}")
-            st.caption(f"Recorded: {an.get('recorded_at', 'N/A')[:19]}")
+            st.caption(f"Recorded: {str(an.get('created_at', an.get('recorded_at', 'N/A')))[:19]}")
         else:
             st.warning("No anomaly records found. Run calibration first, then collect telemetry.")
     else:
         if anomalies:
             latest = anomalies[0]
-            score = latest.get("anomaly_score", 0.0)
+            score = latest.get("score", latest.get("anomaly_score", 0.0))
             threshold = latest.get("threshold", 0.0)
             is_anom = bool(latest.get("is_anomaly", False))
             st.caption(f"Latest anomaly: score={score:.3f}, threshold={threshold:.3f}, anomaly={'YES' if is_anom else 'no'}")
@@ -1396,7 +1396,7 @@ if st.session_state.test_results:
         elif test_name == "vibration":
             if result:
                 is_anom = bool(result.get("is_anomaly", False))
-                summary_rows.append({"Test": "Vibration Anomaly", "Status": "ANOMALY" if is_anom else "NOMINAL", "Detail": f"score={result.get('anomaly_score', 0):.3f}"})
+                summary_rows.append({"Test": "Vibration Anomaly", "Status": "ANOMALY" if is_anom else "NOMINAL", "Detail": f"score={result.get('score', result.get('anomaly_score', 0)):.3f}"})
             else:
                 summary_rows.append({"Test": "Vibration Anomaly", "Status": "NO DATA", "Detail": ""})
         elif test_name == "camera":
@@ -1443,11 +1443,10 @@ with cal_left:
             st.caption(f"Mean acc: {baseline.get('mean_acc', 0):.4f} g")
             st.caption(f"Std acc: {baseline.get('std_acc', 0):.4f} g")
             st.caption(f"Samples: {baseline.get('sample_count', 0)}")
-        thresholds = pkg.get("thresholds", {}) if isinstance(pkg, dict) else {}
-        if thresholds:
-            st.caption(f"Decision threshold: {thresholds.get('decision_threshold', 'N/A')}")
-            st.caption(f"Hysteresis high: {thresholds.get('hysteresis_high', 'N/A')}")
-            st.caption(f"Hysteresis low: {thresholds.get('hysteresis_low', 'N/A')}")
+        if isinstance(pkg, dict) and pkg:
+            st.caption(f"Decision threshold: {pkg.get('decision_threshold', 'N/A')}")
+            st.caption(f"Hysteresis high: {pkg.get('hysteresis_high', 'N/A')}")
+            st.caption(f"Hysteresis low: {pkg.get('hysteresis_low', 'N/A')}")
     else:
         st.warning("\u26a0\ufe0f No calibrated model yet")
         st.caption("Collect 20+ telemetry samples, then run calibration below.")
@@ -1504,10 +1503,10 @@ with cal_right:
         an_rows = []
         for a in anomalies[:10]:
             an_rows.append({
-                "Score": f"{float(a.get('anomaly_score', 0) or 0):.3f}",
+                "Score": f"{float(a.get('score', a.get('anomaly_score', 0)) or 0):.3f}",
                 "Threshold": f"{float(a.get('threshold', 0) or 0):.3f}",
                 "Anomaly": "YES" if bool(a.get("is_anomaly")) else "no",
-                "Time": str(a.get("recorded_at", ""))[:19],
+                "Time": str(a.get("created_at", a.get("recorded_at", "")))[:19],
             })
         st.dataframe(an_rows, use_container_width=True, hide_index=True)
     else:
