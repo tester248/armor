@@ -326,6 +326,64 @@ class RoboflowClient:
         return None
 
 
+# ── Lightweight person detector (continuous, CPU, no API cost) ────────────────
+class PersonDetector:
+    """OpenCV HOG + SVM person detector.
+
+    Runs continuously on every captured frame with zero API cost. Used as a
+    gate: the expensive Roboflow helmet check only fires when a person is
+    actually in frame, mirroring how Windows Hello wakes IR+camera on approach.
+    """
+
+    def __init__(self) -> None:
+        self._hog = cv2.HOGDescriptor()
+        self._hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+        # Detection parameters tuned for a stationary camera at ~1-3 m range.
+        self._win_stride = (8, 8)
+        self._padding = (16, 16)
+        self._scale = 1.05
+        self._hit_threshold = 0.0
+
+    def detect(self, frame: np.ndarray) -> tuple[bool, list[tuple[int, int, int, int]]]:
+        """Return (person_present, bounding_boxes) for a BGR frame."""
+        try:
+            # HOG works on grayscale; downscale large frames for speed.
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            h, w = gray.shape
+            max_side = 640
+            if max(h, w) > max_side:
+                scale = max_side / max(h, w)
+                gray = cv2.resize(gray, (int(w * scale), int(h * scale)))
+
+            boxes, _weights = self._hog.detectMultiScale(
+                gray,
+                winStride=self._win_stride,
+                padding=self._padding,
+                scale=self._scale,
+                hitThreshold=self._hit_threshold,
+            )
+
+            # Convert (x, y, w, h) to (x1, y1, x2, y2) and rescale if downsized.
+            person_boxes: list[tuple[int, int, int, int]] = []
+            if len(boxes) > 0:
+                scale_back = 1.0
+                if max(h, w) > max_side:
+                    scale_back = max(h, w) / max_side
+                for x, y, bw, bh in boxes:
+                    person_boxes.append(
+                        (
+                            int(x * scale_back),
+                            int(y * scale_back),
+                            int((x + bw) * scale_back),
+                            int((y + bh) * scale_back),
+                        )
+                    )
+            return len(person_boxes) > 0, person_boxes
+        except Exception as e:
+            print(f"[PersonDetector] Detection failed: {e}")
+            return False, []
+
+
 # ── Roboflow status interpretation ────────────────────────────────────────────
 def _roboflow_status_to_compliant(status: str | None) -> bool:
     """Interpret the workflow's helmet_status string into PASS/FAIL."""
@@ -507,6 +565,15 @@ class VisionEngine:
         self._roboflow_client: RoboflowClient | None = None
         self._roboflow_available = False
 
+        # Person-detection gate (continuous, CPU, no API cost)
+        self._person_detector = PersonDetector()
+        self._person_present: bool = False
+        self._person_boxes: list[tuple[int, int, int, int]] = []
+        self._person_lock = threading.Lock()
+        # Vision state machine: SCANNING -> PERSON_DETECTED -> HELMET_CHECKING -> HELMET_PASS/FAIL
+        self._vision_state: str = "SCANNING"
+        self._last_helmet_result: dict | None = None
+
         if ROBOFLOW_API_KEY:
             try:
                 self._roboflow_client = RoboflowClient(
@@ -557,6 +624,15 @@ class VisionEngine:
             if self._cap and self._cap.isOpened():
                 ret, frame = self._cap.read()
                 if ret:
+                    # ── Person detection gate (every frame, CPU, no API cost) ──
+                    person_present, person_boxes = self._person_detector.detect(frame)
+                    with self._person_lock:
+                        self._person_present = person_present
+                        self._person_boxes = person_boxes
+                    if person_present and self._vision_state == "SCANNING":
+                        self._vision_state = "PERSON_DETECTED"
+                        print(f"[VisionEngine] Person detected ({len(person_boxes)} box(es))")
+
                     with self._frame_lock:
                         self._latest_frame = frame
                 else:
@@ -574,6 +650,9 @@ class VisionEngine:
                 )
                 with self._frame_lock:
                     self._latest_frame = blank
+                with self._person_lock:
+                    self._person_present = False
+                    self._person_boxes = []
             time.sleep(0.033)  # ~30 fps
 
     def _get_frame(self) -> np.ndarray:
@@ -606,14 +685,57 @@ class VisionEngine:
             )
             time.sleep(0.05)  # ~20 fps for stream
 
+    # ── Person state accessors ────────────────────────────────────────────────
+    def get_person_state(self) -> dict[str, Any]:
+        """Return current person-detection state for the dashboard."""
+        with self._person_lock:
+            return {
+                "person_present": self._person_present,
+                "person_boxes": list(self._person_boxes),
+                "vision_state": self._vision_state,
+                "last_helmet_result": self._last_helmet_result,
+            }
+
+    def reset_vision_state(self) -> None:
+        """Reset the vision state machine back to SCANNING."""
+        with self._person_lock:
+            self._vision_state = "SCANNING"
+            self._last_helmet_result = None
+
     # ── Inspection ────────────────────────────────────────────────────────────
     def inspect(self, worker_id: str, device_id: str) -> dict:
         """Run helmet compliance check on the current frame.
 
-        Returns result dict and saves snapshot JPEG.
-        Called by the FastAPI breach handler and the dashboard manual test.
+        Gated by continuous person detection: if no person is in frame, the
+        expensive Roboflow helmet check is skipped and the result reports
+        SCANNING (compliant=None). Called by the FastAPI breach handler and
+        the dashboard manual test.
         """
         frame = self._get_frame()
+
+        with self._person_lock:
+            person_present = self._person_present
+            current_state = self._vision_state
+
+        # No person → skip helmet check entirely
+        if not person_present:
+            self._vision_state = "SCANNING"
+            ts_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            filename = f"{device_id}_{worker_id}_{ts_str}.jpg"
+            snapshot_path = str(SNAPSHOT_DIR / filename)
+            cv2.imwrite(snapshot_path, frame)
+
+            return _make_result(
+                worker_id=worker_id,
+                device_id=device_id,
+                compliant=None,
+                compliance_ratio=0.0,
+                label="SCANNING",
+                snapshot_path=snapshot_path,
+            )
+
+        # Person present → run helmet check
+        self._vision_state = "HELMET_CHECKING"
 
         if self._roboflow_available and self._roboflow_client is not None:
             compliant, ratio, label, annotated = _roboflow_inspect(
@@ -622,20 +744,40 @@ class VisionEngine:
         else:
             compliant, ratio, label, annotated = _stub_inspect(frame, worker_id)
 
-        # Save snapshot
-        ts_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        filename = f"{device_id}_{worker_id}_{ts_str}.jpg"
-        snapshot_path = str(SNAPSHOT_DIR / filename)
-        cv2.imwrite(snapshot_path, annotated)
+        # Update state machine
+        if compliant is None:
+            self._vision_state = "VISION_UNAVAILABLE"
+        elif compliant:
+            self._vision_state = "HELMET_PASS"
+        else:
+            self._vision_state = "HELMET_FAIL"
 
-        return _make_result(
+        result = _make_result(
             worker_id=worker_id,
             device_id=device_id,
             compliant=compliant,
             compliance_ratio=ratio,
             label=label,
-            snapshot_path=snapshot_path,
+            snapshot_path="",  # set below after save
         )
+
+        # Save snapshot and stash result for state accessors
+        ts_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        filename = f"{device_id}_{worker_id}_{ts_str}.jpg"
+        snapshot_path = str(SNAPSHOT_DIR / filename)
+        cv2.imwrite(snapshot_path, annotated)
+
+        result["snapshot_path"] = snapshot_path
+        with self._person_lock:
+            self._last_helmet_result = {
+                "compliant": compliant,
+                "compliance_ratio": ratio,
+                "label": label,
+                "snapshot_path": snapshot_path,
+                "timestamp": result["timestamp"],
+            }
+
+        return result
 
 
 # ── Smoke test ────────────────────────────────────────────────────────────────
