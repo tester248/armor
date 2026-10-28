@@ -61,8 +61,9 @@ from backend.models import (
 )
 from backend.ml_engine import (
     build_feature_matrix,
-    train_isolation_forest_distilled,
+    train_isolation_forest,
     score_feature_vector,
+    score_with_forest,
     latest_feature_vector,
     FEATURE_ORDER,
 )
@@ -144,6 +145,21 @@ def _load_model_package(device_id: str) -> dict[str, Any] | None:
     return package if isinstance(package, dict) else None
 
 
+def _score_package(feature_vector: Any, package: dict[str, Any]) -> float | None:
+    """Score one feature vector with whichever model the package describes."""
+    model_path = package.get("model_path")
+    if model_path:
+        score = score_with_forest(feature_vector, model_path)
+        if score is not None:
+            return score
+        print(f"[ML] Forest unavailable at {model_path}; recalibrate.")
+        return None
+    if "weights" in package and "bias" in package:
+        # Legacy distilled package.
+        return score_feature_vector(feature_vector, package)
+    return None
+
+
 def _score_anomaly(device_id: str) -> None:
     """Score recent telemetry for anomaly if a calibrated model exists."""
     try:
@@ -154,7 +170,9 @@ def _score_anomaly(device_id: str) -> None:
         fv = latest_feature_vector(recent, window_size=25)
         if fv is None:
             return
-        score = score_feature_vector(fv, package)
+        score = _score_package(fv, package)
+        if score is None:
+            return
         high = float(package.get("hysteresis_high", package.get("decision_threshold", 0.0)))
         is_anom = score >= high
         store.record_anomaly("machino_node_01", device_id, score, high, is_anom)
@@ -565,7 +583,9 @@ def ingest_telemetry(payload: TelemetryIngestRequest):
             recent = store.get_recent_samples_for_ml(payload.device_id, limit=50)
             fv = latest_feature_vector(recent, window_size=25)
             if fv is not None:
-                score = score_feature_vector(fv, package)
+                score = _score_package(fv, package)
+                if score is None:
+                    return {"status": "accepted", "device_id": payload.device_id, "timestamp": _utc_now()}
                 high = float(package.get("hysteresis_high", package.get("decision_threshold", 0.0)))
                 low = float(package.get("hysteresis_low", high))
                 is_anom = score >= high
@@ -770,7 +790,11 @@ def deactivate_worker(badge_mac: str):
 # ============================================================================
 @app.post("/api/v1/calibrate", tags=["Calibration"])
 def calibrate(device_id: str = Query(default="machino_node_01"), contamination: float = Query(default=0.05, ge=0.01, le=0.4)):
-    """Run calibration on recent telemetry samples. Trains an IsolationForest-distilled model."""
+    """Train the server-side IsolationForest on recent telemetry samples.
+
+    Scoring runs on this PC, so the forest is kept intact rather than distilled
+    into a linear surrogate for the ESP32.
+    """
     samples = store.get_recent_samples_for_ml(device_id, limit=500)
     if len(samples) < 20:
         raise HTTPException(status_code=400, detail="Need at least 20 telemetry samples for calibration.")
@@ -780,7 +804,12 @@ def calibrate(device_id: str = Query(default="machino_node_01"), contamination: 
     if feature_matrix.shape[0] < 8:
         raise HTTPException(status_code=400, detail="Not enough windows for calibration.")
 
-    package = train_isolation_forest_distilled(feature_matrix, contamination=contamination)
+    model_path = Path(ARMOR_DB).parent / "models" / f"{device_id}.joblib"
+    package = train_isolation_forest(
+        feature_matrix,
+        contamination=contamination,
+        model_path=model_path,
+    )
 
     acc_vals = [s["acc_mag"] for s in samples]
     baseline = {
@@ -794,15 +823,16 @@ def calibrate(device_id: str = Query(default="machino_node_01"), contamination: 
         device_id=device_id,
         package=package,
         baseline_stats=baseline,
-        quality=package.get("quality_correlation"),
+        quality=None,
         window_count=package.get("window_count"),
     )
 
     return {
         "status": "completed",
         "device_id": device_id,
+        "model_type": package.get("model_type"),
         "window_count": package.get("window_count"),
-        "quality": package.get("quality_correlation"),
+        "train_score_p95": package.get("train_score_p95"),
         "model_package": package,
     }
 

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 from typing import Mapping, Sequence
 
+import joblib
 import numpy as np
 from sklearn.ensemble import IsolationForest
 from sklearn.svm import OneClassSVM
@@ -13,16 +15,22 @@ FEATURE_ORDER = [
     "mean_acc_mag",
     "std_acc_mag",
     "max_acc_mag",
-    "mean_gyro_mag",
-    "std_gx",
-    "std_gy",
-    "std_gz",
-    "axis_imbalance_ratio",
+    "crest_factor",
+    "temperature_c",
+    "current_mean",
+    "current_std",
+    "range_ratio",
 ]
 
 
 def _values(window: Sequence[Mapping[str, float]], key: str) -> np.ndarray:
-    return np.array([float(sample.get(key, 0.0)) for sample in window], dtype=float)
+    out: list[float] = []
+    for sample in window:
+        try:
+            out.append(float(sample.get(key, 0.0)))
+        except (TypeError, ValueError):
+            out.append(0.0)
+    return np.array(out, dtype=float)
 
 
 def _std(values: np.ndarray) -> float:
@@ -32,32 +40,34 @@ def _std(values: np.ndarray) -> float:
 
 
 def extract_feature_vector(window: Sequence[Mapping[str, float]]) -> np.ndarray:
-    """Build the compact 8-feature vector used by backend and ESP32."""
+    """Build the 8-feature vector scored by the server-side model.
+
+    The ESP32 reports RMS vibration, crest factor, temperature and current; the
+    old vector was padded with gyro/axis features that are always zero, which
+    left IsolationForest with almost no structure to separate normal from
+    abnormal operation.
+    """
     if not window:
         raise ValueError("Cannot extract features from an empty window.")
 
     acc = _values(window, "acc_mag")
-    gyro_mag = _values(window, "gyro_mag")
-    gx = _values(window, "gx")
-    gy = _values(window, "gy")
-    gz = _values(window, "gz")
+    crest = _values(window, "crest_factor")
+    temp = _values(window, "temperature_c")
+    current = _values(window, "current_ma")
 
-    std_gx = _std(gx)
-    std_gy = _std(gy)
-    std_gz = _std(gz)
-    axis_sum = std_gx + std_gy + std_gz
-    axis_imbalance_ratio = max(std_gx, std_gy, std_gz) / (axis_sum + 1e-6)
+    mean_acc = float(np.mean(acc))
+    acc_range = float(np.max(acc) - np.min(acc))
 
     return np.array(
         [
-            float(np.mean(acc)),
+            mean_acc,
             _std(acc),
             float(np.max(acc)),
-            float(np.mean(gyro_mag)),
-            std_gx,
-            std_gy,
-            std_gz,
-            float(axis_imbalance_ratio),
+            float(np.mean(crest)),
+            float(np.mean(temp)),
+            float(np.mean(current)),
+            _std(current),
+            acc_range / (abs(mean_acc) + 1e-6),
         ],
         dtype=float,
     )
@@ -86,6 +96,91 @@ def build_feature_matrix(
     if not feature_rows:
         return np.empty((0, len(FEATURE_ORDER)))
     return np.vstack(feature_rows)
+
+
+def train_isolation_forest(
+    feature_matrix: np.ndarray,
+    contamination: float,
+    model_path: str | Path,
+) -> dict:
+    """Train a full IsolationForest on the backend and persist it to disk.
+
+    Scoring runs on the PC, so there is no reason to distill the forest into a
+    linear surrogate: the Ridge approximation was fit on nearly constant
+    training data and extrapolated in the wrong direction (higher vibration
+    produced a *lower* anomaly score). The forest itself is scale-free and
+    flags out-of-range windows even when training saw nothing like them.
+    """
+    if feature_matrix.shape[0] < 8:
+        raise ValueError("Need at least 8 windows for calibration.")
+
+    forest = IsolationForest(
+        n_estimators=300,
+        contamination=contamination,
+        max_samples="auto",
+        random_state=42,
+        n_jobs=-1,
+    )
+    forest.fit(feature_matrix)
+
+    train_scores = -forest.decision_function(feature_matrix)
+    out_path = Path(model_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(forest, out_path, compress=3)
+
+    stds = np.std(feature_matrix, axis=0)
+    return {
+        "model_type": "isolation_forest",
+        "model_path": str(out_path),
+        "feature_order": FEATURE_ORDER,
+        "feature_means": np.mean(feature_matrix, axis=0).tolist(),
+        "feature_stds": np.where(stds < 1e-6, 1.0, stds).tolist(),
+        "contamination": float(contamination),
+        "window_count": int(feature_matrix.shape[0]),
+        "train_score_mean": float(np.mean(train_scores)),
+        "train_score_p95": float(np.percentile(train_scores, 95)),
+        # score = -decision_function, so 0 is the forest's own boundary.
+        "decision_threshold": 0.0,
+        "hysteresis_high": 0.0,
+        "hysteresis_low": 0.0,
+    }
+
+
+_MODEL_CACHE: dict[str, tuple[float, IsolationForest]] = {}
+
+
+def load_forest(model_path: str | Path) -> IsolationForest | None:
+    """Load a persisted forest, reusing it while the file is unchanged."""
+    path = Path(model_path)
+    try:
+        if not path.exists():
+            return None
+        mtime = path.stat().st_mtime
+        cached = _MODEL_CACHE.get(str(path))
+        if cached and cached[0] == mtime:
+            return cached[1]
+        forest = joblib.load(path)
+        _MODEL_CACHE[str(path)] = (mtime, forest)
+        return forest
+    except Exception as exc:  # corrupt file / sklearn version drift
+        print(f"[ML] Could not load model {path}: {exc}")
+        return None
+
+
+def score_with_forest(
+    feature_vector: np.ndarray,
+    model_path: str | Path,
+) -> float | None:
+    """Return an anomaly score where higher means more anomalous."""
+    forest = load_forest(model_path)
+    if forest is None:
+        return None
+    vector = np.asarray(feature_vector, dtype=float).reshape(1, -1)
+    try:
+        return float(-forest.decision_function(vector)[0])
+    except Exception as exc:
+        print(f"[ML] Forest scoring failed: {exc}")
+        return None
 
 
 def train_isolation_forest_distilled(

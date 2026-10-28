@@ -1417,7 +1417,7 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-st.caption("Train the IsolationForest-distilled anomaly model on real ADXL345 telemetry. No synthetic data.")
+st.caption("Train a full IsolationForest on real ADXL345 telemetry; scoring runs on the backend. No synthetic data.")
 
 cal_left, cal_right = st.columns(2)
 
@@ -1484,7 +1484,7 @@ with cal_left:
 
     if "calibration" in st.session_state.test_results:
         cresp = st.session_state.test_results["calibration"]
-        st.success(f"Calibration done — {cresp.get('window_count', 0)} windows, quality={cresp.get('quality', 'N/A')}")
+        st.success(f"Calibration done — {cresp.get('window_count', 0)} windows, model={cresp.get('model_type', 'N/A')}")
 
 with cal_right:
     st.markdown("#### Sample Availability")
