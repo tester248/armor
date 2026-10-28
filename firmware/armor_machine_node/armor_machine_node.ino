@@ -25,11 +25,14 @@
 #include <DallasTemperature.h>
 #include <Adafruit_INA219.h>
 #include <ArduinoJson.h>
+#include <time.h>
 
 // ---------- WiFi & MQTT Config ----------
+// MQTT_BROKER must be the laptop running the ARMOR FastAPI backend.
+// Reserve a static DHCP lease for that laptop so this address does not drift.
 const char* WIFI_SSID     = "ARMOR";
 const char* WIFI_PASSWORD = "12345678";
-const char* MQTT_BROKER   = "10.24.103.187";   // Backend host IP on hotspot
+const char* MQTT_BROKER   = "10.24.103.35";   // Backend host (laptop) on the hotspot
 const uint16_t MQTT_PORT  = 1883;
 const char* DEVICE_ID     = "machino_node_01";
 
@@ -83,10 +86,30 @@ volatile bool gInterlock          = false; // Safety lock (MQTT or proximity bre
 volatile bool motorRunning        = false; // Physical motor output state
 
 // RSSI / EMA (ESP-NOW Wearable Badge Receiver)
-static const float EMA_ALPHA      = 0.35f;
-static const float RSSI_THRESHOLD = -65.0f;
-float gEmaRssi = 0.0f;
-bool  gEmaInit = false;
+static const float EMA_ALPHA       = 0.35f;
+static const float RSSI_ENTER      = -65.0f;  // breach when smoothed RSSI is above this
+static const float RSSI_EXIT       = -70.0f;  // hysteresis: clear only below this
+static const float RSSI_AT_1M      = -45.0f;  // calibrate at the venue (RSSI at 1 metre)
+static const float PATH_LOSS_N     = 2.2f;    // indoor path-loss exponent
+volatile float gEmaRssi = 0.0f;
+volatile bool gEmaInit = false;
+
+// Last badge heard over ESP-NOW. The callback runs in the WiFi task, so the
+// shared fields are copied under a critical section.
+portMUX_TYPE gBadgeMux = portMUX_INITIALIZER_UNLOCKED;
+char    gBadgeId[32]  = "";
+uint8_t gBadgeMac[6]  = {0};
+float   gBadgeBattery = 0.0f;
+bool    gBadgeSeen    = false;
+
+// Vibration RMS window: 100 samples at 100 Hz = 1 second, values in g.
+static const int VIB_WINDOW = 100;
+float vSumX = 0.0f, vSumY = 0.0f, vSumZ = 0.0f;
+float vSumSqX = 0.0f, vSumSqY = 0.0f, vSumSqZ = 0.0f;
+float vMinX = 1e9f, vMaxX = -1e9f;
+float vMinY = 1e9f, vMaxY = -1e9f;
+float vMinZ = 1e9f, vMaxZ = -1e9f;
+int   vCount = 0;
 
 // ---------- ADXL Helpers ----------
 void adxlWrite(uint8_t reg, uint8_t val) {
@@ -139,10 +162,49 @@ void readAxes(float &ax, float &ay, float &az) {
   uint8_t x0 = adxlRead(0x32), x1 = adxlRead(0x33);
   uint8_t y0 = adxlRead(0x34), y1 = adxlRead(0x35);
   uint8_t z0 = adxlRead(0x36), z1 = adxlRead(0x37);
-  const float scale = 0.0039f * 9.80665f;
+  const float scale = 0.0039f;  // ADXL345 FULL_RES: 3.9 mg/LSB, output in g
   ax = (int16_t)((x1 << 8) | x0) * scale;
   ay = (int16_t)((y1 << 8) | y0) * scale;
   az = (int16_t)((z1 << 8) | z0) * scale;
+}
+
+// RMS of the dynamic acceleration over a 1-second window. Subtracting each
+// axis mean removes the 1 g gravity component; crest factor is peak/RMS.
+void accumulateVibration(float ax, float ay, float az) {
+  vSumX += ax; vSumY += ay; vSumZ += az;
+  vSumSqX += ax * ax; vSumSqY += ay * ay; vSumSqZ += az * az;
+  if (ax < vMinX) vMinX = ax;
+  if (ax > vMaxX) vMaxX = ax;
+  if (ay < vMinY) vMinY = ay;
+  if (ay > vMaxY) vMaxY = ay;
+  if (az < vMinZ) vMinZ = az;
+  if (az > vMaxZ) vMaxZ = az;
+  vCount++;
+
+  if (vCount < VIB_WINDOW) return;
+
+  const float n = (float)VIB_WINDOW;
+  const float mx = vSumX / n;
+  const float my = vSumY / n;
+  const float mz = vSumZ / n;
+  const float varX = vSumSqX / n - mx * mx;
+  const float varY = vSumSqY / n - my * my;
+  const float varZ = vSumSqZ / n - mz * mz;
+  const float rms = sqrtf(fmaxf(0.0f, varX) + fmaxf(0.0f, varY) + fmaxf(0.0f, varZ));
+
+  const float px = fmaxf(fabsf(vMaxX - mx), fabsf(vMinX - mx));
+  const float py = fmaxf(fabsf(vMaxY - my), fabsf(vMinY - my));
+  const float pz = fmaxf(fabsf(vMaxZ - mz), fabsf(vMinZ - mz));
+  const float peak = sqrtf(px * px + py * py + pz * pz);
+
+  gRms = rms;
+  gCrestFactor = (rms > 0.01f) ? (peak / rms) : 0.0f;
+
+  vSumX = vSumY = vSumZ = 0.0f;
+  vSumSqX = vSumSqY = vSumSqZ = 0.0f;
+  vMinX = vMinY = vMinZ = 1e9f;
+  vMaxX = vMaxY = vMaxZ = -1e9f;
+  vCount = 0;
 }
 
 // ---------- Blynk Handlers ----------
@@ -187,11 +249,20 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
 
 void ensureMqtt() {
   if (mqtt.connected()) return;
+
+  // Do not block the telemetry loop with a connect attempt every 10 ms.
+  static uint32_t lastAttempt = 0;
+  uint32_t now = millis();
+  if (now - lastAttempt < 5000) return;
+  lastAttempt = now;
+
   String clientId = String("armor-node-") + DEVICE_ID;
   if (mqtt.connect(clientId.c_str())) {
     String topic = String("machinocare/v1/devices/") + DEVICE_ID + "/interlock";
     mqtt.subscribe(topic.c_str(), 1);
     Serial.println("[MQTT] Connected & Subscribed to interlock topic");
+  } else {
+    Serial.printf("[MQTT] Connect failed, rc=%d\r\n", mqtt.state());
   }
 }
 
@@ -205,9 +276,23 @@ typedef struct {
 
 void onEspNowRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
   if (len < (int)sizeof(BadgeBeacon)) return;
+
+  BadgeBeacon beacon;
+  memcpy(&beacon, data, sizeof(beacon));
+  beacon.badge_id[sizeof(beacon.badge_id) - 1] = '\0';
+
   int rssi = (info && info->rx_ctrl) ? info->rx_ctrl->rssi : 0;
   if (!gEmaInit) { gEmaRssi = (float)rssi; gEmaInit = true; }
   else            { gEmaRssi = EMA_ALPHA * rssi + (1.0f - EMA_ALPHA) * gEmaRssi; }
+
+  const uint8_t* src = (info && info->src_addr) ? info->src_addr : beacon.sender_mac;
+  portENTER_CRITICAL(&gBadgeMux);
+  strncpy(gBadgeId, beacon.badge_id, sizeof(gBadgeId) - 1);
+  gBadgeId[sizeof(gBadgeId) - 1] = '\0';
+  memcpy(gBadgeMac, src, sizeof(gBadgeMac));
+  gBadgeBattery = beacon.battery_voltage;
+  gBadgeSeen = true;
+  portEXIT_CRITICAL(&gBadgeMux);
 }
 
 // ---------- Core 0: Safety & Motor Actuation + Sensor Loop ----------
@@ -235,16 +320,28 @@ void core0Task(void* pv) {
     // --- Sensor Acquisition ---
     float ax, ay, az;
     readAxes(ax, ay, az);
-    gRms = sqrtf(ax*ax + ay*ay + az*az);
-    gCrestFactor = 0.0f;
+    accumulateVibration(ax, ay, az);
 
     gVoltageV  = ina219.getBusVoltage_V();
     gCurrentMa = ina219.getCurrent_mA();
 
-    tempSensor.requestTemperatures();
-    float tc = tempSensor.getTempCByIndex(0);
-    if (tc != DEVICE_DISCONNECTED_C && tc != 85.0f && tc > -50.0f) {
-      gTempC = tc;
+    // DS18B20 conversion takes ~750 ms. Request it without blocking and read
+    // the result on a later iteration so the 100 Hz sampling loop stays intact.
+    static uint32_t lastTempRequest = 0;
+    static bool tempConversionPending = false;
+    uint32_t nowMs = millis();
+
+    if (!tempConversionPending && (nowMs - lastTempRequest >= 1000)) {
+      tempSensor.requestTemperatures();
+      lastTempRequest = nowMs;
+      tempConversionPending = true;
+    }
+    if (tempConversionPending && (nowMs - lastTempRequest >= 800)) {
+      float tc = tempSensor.getTempCByIndex(0);
+      if (tc != DEVICE_DISCONNECTED_C && tc != 85.0f && tc > -50.0f) {
+        gTempC = tc;
+      }
+      tempConversionPending = false;
     }
 
     vTaskDelayUntil(&last, period);
@@ -268,6 +365,8 @@ void core1Task(void* pv) {
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.printf("\r\n[WiFi] Connected to '%s'! IP: %s\r\n", WIFI_SSID, WiFi.localIP().toString().c_str());
+    // Wall-clock time for telemetry timestamps (UTC).
+    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
     Blynk.config(BLYNK_AUTH_TOKEN);
     Blynk.connect();
   } else {
@@ -284,10 +383,14 @@ void core1Task(void* pv) {
 
   mqtt.setServer(MQTT_BROKER, MQTT_PORT);
   mqtt.setCallback(mqttCallback);
+  mqtt.setKeepAlive(15);
+  mqtt.setSocketTimeout(2);
 
   uint32_t lastTelemetry = 0;
   uint32_t lastBreachCheck = 0;
   uint32_t lastWiFiRetry = 0;
+  uint32_t lastBreachPublish = 0;
+  bool breachLatched = false;
 
   while (true) {
     uint32_t now = millis();
@@ -325,10 +428,13 @@ void core1Task(void* pv) {
 
       // Publish Telemetry to MQTT
       if (mqtt.connected()) {
-        StaticJsonDocument<256> doc;
+        StaticJsonDocument<320> doc;
         doc["device_id"]   = DEVICE_ID;
-        doc["timestamp"]    = now;
-        doc["motor_state"] = motorRunning ? "RUNNING" : "LOCKED";
+        time_t epochSec = time(nullptr);
+        if (epochSec > 1700000000) {           // NTP synced
+          doc["timestamp"] = (uint64_t)epochSec * 1000ULL;
+        }
+        doc["motor_state"] = gInterlock ? "LOCKED" : (motorRunning ? "RUNNING" : "IDLE");
         JsonObject vib = doc.createNestedObject("vibration");
         vib["rms"]          = gRms;
         vib["crest_factor"] = gCrestFactor;
@@ -345,21 +451,57 @@ void core1Task(void* pv) {
       }
     }
 
-    // 10 Hz Proximity Breach Check
+    // 10 Hz Proximity Breach Check (edge-triggered, repeat every 10 s while inside)
     if (now - lastBreachCheck >= 100) {
       lastBreachCheck = now;
-      if (gEmaInit && gEmaRssi > RSSI_THRESHOLD && mqtt.connected()) {
-        StaticJsonDocument<256> doc;
-        doc["device_id"]      = DEVICE_ID;
-        doc["worker_id"]      = "BADGE-EMP-402";
-        doc["badge_mac"]      = "00:00:00:00:00:00";
-        doc["rssi_raw"]       = (int)gEmaRssi;
-        doc["rssi_smoothed"]  = gEmaRssi;
-        doc["distance_est_m"] = 1.2;
-        doc["timestamp"]      = now;
-        char buf[512];
-        serializeJson(doc, buf);
-        mqtt.publish("machinocare/v1/events/proximity", buf, false);
+
+      if (gEmaInit) {
+        bool inside = breachLatched ? (gEmaRssi > RSSI_EXIT)
+                                    : (gEmaRssi > RSSI_ENTER);
+
+        if (!inside) {
+          breachLatched = false;
+        } else if (!breachLatched || (now - lastBreachPublish >= 10000)) {
+          breachLatched = true;
+          lastBreachPublish = now;
+
+          char badgeId[32];
+          uint8_t mac[6];
+          float battery;
+          portENTER_CRITICAL(&gBadgeMux);
+          strncpy(badgeId, gBadgeId, sizeof(badgeId) - 1);
+          badgeId[sizeof(badgeId) - 1] = '\0';
+          memcpy(mac, gBadgeMac, sizeof(mac));
+          battery = gBadgeBattery;
+          portEXIT_CRITICAL(&gBadgeMux);
+
+          char macStr[18];
+          snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+                   mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+          float distance = powf(10.0f, (RSSI_AT_1M - gEmaRssi) / (10.0f * PATH_LOSS_N));
+
+          if (mqtt.connected()) {
+            StaticJsonDocument<384> doc;
+            doc["device_id"]      = DEVICE_ID;
+            doc["worker_id"]      = badgeId;
+            doc["badge_id"]       = badgeId;
+            doc["badge_mac"]      = macStr;
+            doc["rssi_raw"]       = (int)roundf(gEmaRssi);
+            doc["rssi_smoothed"]  = gEmaRssi;
+            doc["distance_est_m"] = distance;
+            doc["battery_v"]      = battery;
+            time_t epochSec = time(nullptr);
+            if (epochSec > 1700000000) {
+              doc["timestamp"] = (uint64_t)epochSec * 1000ULL;
+            }
+            char buf[512];
+            serializeJson(doc, buf);
+            mqtt.publish("machinocare/v1/events/proximity", buf, false);
+            Serial.printf("[SAFETY] Badge %s (%s) at %.2f m (RSSI %.1f)\r\n",
+                          badgeId, macStr, distance, gEmaRssi);
+          }
+        }
       }
     }
 
@@ -395,6 +537,7 @@ void setup() {
   Wire.begin(I2C_SDA, I2C_SCL);
   ina219.begin();
   tempSensor.begin();
+  tempSensor.setWaitForConversion(false);  // keep the 100 Hz loop non-blocking
 
   if (!initADXL()) {
     Serial.println("[ADXL345] Init FAILED (check wiring)");
