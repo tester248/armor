@@ -165,7 +165,7 @@ void readAxes(float &ax, float &ay, float &az) {
   uint8_t x0 = adxlRead(0x32), x1 = adxlRead(0x33);
   uint8_t y0 = adxlRead(0x34), y1 = adxlRead(0x35);
   uint8_t z0 = adxlRead(0x36), z1 = adxlRead(0x37);
-  const float scale = 0.0039f;  // ADXL345 FULL_RES: 3.9 mg/LSB, output in g
+  const float scale = 0.00390625f;  // ADXL345 FULL_RES: 1/256 = 0.00390625 g/LSB, output in g
   ax = (int16_t)((x1 << 8) | x0) * scale;
   ay = (int16_t)((y1 << 8) | y0) * scale;
   az = (int16_t)((z1 << 8) | z0) * scale;
@@ -437,14 +437,14 @@ void core1Task(void* pv) {
       if (mqtt.connected()) {
         snprintf(mqttStr, sizeof(mqttStr), "CONNECTED (%s)", MQTT_BROKER);
       } else {
-        snprintf(mqttStr, sizeof(mqttStr), "OFFLINE");
+        snprintf(mqttStr, sizeof(mqttStr), "OFFLINE (%s)", MQTT_BROKER);
       }
 
-      Serial.printf("[TELEMETRY] Temp: %4.1f C | Bus: %5.2f V | Current: %5.1f mA | Motor: %-7s | Blynk: %-7s | MQTT: %-9s | Bench: %-3s | Badge: %s\r\n",
-                    gTempC, gVoltageV, gCurrentMa,
+      Serial.printf("[TELEMETRY] Temp: %4.1f C | Bus: %5.2f V | Current: %5.1f mA | Vib: %5.3f g (CF: %3.1f) | Motor: %-7s | Blynk: %-7s | MQTT: %-25s | Bench: %-3s | Badge: %s\r\n",
+                    gTempC, gVoltageV, gCurrentMa, gRms, gCrestFactor,
                     motorRunning ? "RUNNING" : "STOPPED",
                     Blynk.connected() ? "ONLINE" : "OFFLINE",
-                    mqtt.connected() ? "CONNECTED" : "OFFLINE",
+                    mqttStr,
                     benchTestMode ? "ON" : "OFF",
                     badgeStr);
 
@@ -578,7 +578,8 @@ void setup() {
   if (!initADXL()) {
     Serial.println("[ADXL345] Init FAILED (check wiring)");
   } else {
-    Serial.println("[ADXL345] Init OK");
+    Serial.println("[ADXL345] Init OK: +/-16g Full-Res (0.003906 g/LSB @ 100 Hz Nyquist 50 Hz)");
+    Serial.println("[ADXL345] Expected Baseline: Idle ~0.006g | Warning >0.150g | Critical >0.500g");
   }
 
   // Dual-Core FreeRTOS Tasks
