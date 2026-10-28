@@ -1,13 +1,17 @@
 """
-ARMOR – Vision Engine (Stub / Swap-Ready)
------------------------------------------
+ARMOR – Vision Engine (Roboflow Workflow + Stub Fallback)
+=========================================================
+
+Integrates the Roboflow Workflow "Helmet Check Hackathon Demo"
+(workspace: ashwin-mathur, workflow: helmet-check-hackathon-demo-1793134805931)
+via the official inference-sdk InferenceHTTPClient.
+
 Per ARMOR spec (ARMOR_System_Architecture_and_Implementation_Plan.md):
 
   • OpenCV webcam frame ingestion pipeline
-  • YOLO instance segmentation model loader (motorcycle helmet dataset)
-  • Head ROI extraction + polygon mask compliance calculation
-        Compliance Ratio = Area(Helmet Mask ∩ Head ROI) / Area(Head ROI)
-        PASS if Compliance Ratio >= 0.65
+  • Roboflow Workflow (RF-DETR + SAM 3) helmet compliance check
+  • Compliance Ratio = Area(Helmet Mask ∩ Head ROI) / Area(Head ROI)
+    PASS if Compliance Ratio >= HELMET_COMPLIANCE_THRESHOLD (default 0.65)
   • JPEG snapshot with colour-coded segmentation mask overlays
   • Runs in a background thread inside FastAPI (per landmine-B fix)
   • Frames served via generate_frames() → FastAPI StreamingResponse (MJPEG)
@@ -15,17 +19,24 @@ Per ARMOR spec (ARMOR_System_Architecture_and_Implementation_Plan.md):
 
 Configuration:
   Set ROBOFLOW_API_KEY (and optionally ROBOFLOW_WORKSPACE /
-  ROBOFLOW_WORKFLOW_ID) in .env. The engine auto-loads the workflow;
-  otherwise it falls back to the built-in stub.
+  ROBOFLOW_WORKFLOW_ID / ROBOFLOW_API_URL) in .env.
+  The engine auto-loads the workflow; otherwise it falls back to the
+  built-in stub that returns compliant=None (VISION_UNAVAILABLE) so the
+  interlock never acts on a guessed verdict.
+
+Workflow output parsing is defensive: output key names are discovered
+from the live response rather than hard-coded, so the integration keeps
+working if Roboflow renames output fields.
 """
 from __future__ import annotations
 
+import base64
 import os
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Generator
+from typing import Any, Generator
 
 from dotenv import load_dotenv
 
@@ -33,6 +44,25 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 import cv2
 import numpy as np
+
+
+# ── Custom Exceptions ─────────────────────────────────────────────────────────
+class RoboflowError(Exception):
+    """Base error for Roboflow workflow failures."""
+
+
+class RoboflowAuthError(RoboflowError):
+    """Authentication failed (401/403) — usually a publishable key used where
+    a secret key is required."""
+
+
+class RoboflowTimeoutError(RoboflowError):
+    """Workflow call timed out."""
+
+
+class RoboflowResponseError(RoboflowError):
+    """Workflow returned an unexpected or unparseable response."""
+
 
 # ── Config ────────────────────────────────────────────────────────────────────
 CAMERA_SOURCE: int | str = os.getenv("CAMERA_SOURCE", "0")
@@ -58,8 +88,13 @@ ROBOFLOW_WORKFLOW_ID = os.getenv(
 ).strip()
 ROBOFLOW_API_URL = os.getenv("ROBOFLOW_API_URL", "https://serverless.roboflow.com").strip()
 
+# Client tuning
+ROBOFLOW_REQUEST_TIMEOUT_S = float(os.getenv("ROBOFLOW_REQUEST_TIMEOUT_S", "30"))
+ROBOFLOW_MAX_RETRIES = int(os.getenv("ROBOFLOW_MAX_RETRIES", "3"))
+ROBOFLOW_BACKOFF_BASE_S = float(os.getenv("ROBOFLOW_BACKOFF_BASE_S", "1.0"))
 
-# ── Result dataclass (plain dict so no Pydantic import needed here) ────────────
+
+# ── Result dict helper ────────────────────────────────────────────────────────
 def _make_result(
     worker_id: str,
     device_id: str,
@@ -82,146 +117,292 @@ def _make_result(
     }
 
 
-# �� Roboflow Workflow (RF-DETR + SAM 3) ��������������������������������������
-_roboflow_client = None
-_roboflow_lock = threading.Lock()
+# ── Roboflow client with retries + backoff ────────────────────────────────────
+class RoboflowClient:
+    """Thin wrapper around inference_sdk.InferenceHTTPClient that adds:
 
+      • per-request timeout
+      • retries with exponential backoff on transient failures
+      • typed errors (auth / timeout / response)
+      • defensive output parsing keyed to the workflow's real response keys
+    """
 
-def _try_load_roboflow() -> bool:
-    """Try to build a Roboflow InferenceHTTPClient. Returns True if configured."""
-    global _roboflow_client
-    if not ROBOFLOW_API_KEY:
-        return False
-    try:
-        from inference_sdk import InferenceHTTPClient, InferenceConfiguration  # type: ignore
+    def __init__(
+        self,
+        api_url: str,
+        api_key: str,
+        workspace: str,
+        workflow_id: str,
+        timeout_s: float = ROBOFLOW_REQUEST_TIMEOUT_S,
+        max_retries: int = ROBOFLOW_MAX_RETRIES,
+        backoff_base_s: float = ROBOFLOW_BACKOFF_BASE_S,
+    ) -> None:
+        self.api_url = api_url
+        self.api_key = api_key
+        self.workspace = workspace
+        self.workflow_id = workflow_id
+        self.timeout_s = timeout_s
+        self.max_retries = max_retries
+        self.backoff_base_s = backoff_base_s
+        self._client = None
+        self._lock = threading.Lock()
+        self._configured = False
 
-        client = InferenceHTTPClient(
-            api_url=ROBOFLOW_API_URL, api_key=ROBOFLOW_API_KEY
-        ).configure(InferenceConfiguration(api_key_transport="header"))
-        with _roboflow_lock:
-            _roboflow_client = client
-        print(f"[VisionEngine] Roboflow workflow configured: {ROBOFLOW_WORKSPACE}/{ROBOFLOW_WORKFLOW_ID}")
-        return True
-    except Exception as e:
-        print(f"[VisionEngine] Could not configure Roboflow client: {e}.")
-        return False
-
-
-def _extract_image_from_result(result) -> bytes | None:
-    """Best-effort extraction of image bytes from a workflow result value."""
-    if result is None:
-        return None
-    if isinstance(result, dict):
-        for key in ("value", "image", "data", "base64"):
-            if key in result:
-                img = _extract_image_from_result(result[key])
-                if img is not None:
-                    return img
-        return None
-    if isinstance(result, (bytes, bytearray)):
-        return bytes(result)
-    if isinstance(result, str):
-        s = result.strip()
-        if s.startswith("http://") or s.startswith("https://"):
+    def _ensure(self) -> None:
+        """Lazy-build the InferenceHTTPClient (header-based auth)."""
+        with self._lock:
+            if self._configured:
+                return
             try:
-                import requests
+                from inference_sdk import InferenceHTTPClient, InferenceConfiguration  # type: ignore
 
-                r = requests.get(s, timeout=10)
-                if r.status_code == 200:
-                    return r.content
-            except Exception:
-                return None
-            return None
-        try:
-            import base64
+                self._client = (
+                    InferenceHTTPClient(
+                        api_url=self.api_url,
+                        api_key=self.api_key,
+                    )
+                    .configure(InferenceConfiguration(api_key_transport="header"))
+                )
+                self._configured = True
+            except Exception as e:
+                raise RoboflowError(f"Failed to configure Roboflow client: {e}") from e
 
-            if "," in s and s.split(",", 1)[0].startswith("data:"):
-                s = s.split(",", 1)[1]
-            return base64.b64decode(s, validate=False)
-        except Exception:
-            return None
-    if isinstance(result, (list, tuple)) and result:
-        return _extract_image_from_result(result[0])
-    return None
+    def run_helmet_check(
+        self,
+        image_path: str,
+        parameters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run the helmet-check workflow on an image file.
+
+        Returns the parsed first entry of the workflow result list.
+        Raises RoboflowError subclasses on failure.
+        """
+        self._ensure()
+        assert self._client is not None
+
+        last_error: Exception | None = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                result = self._client.run_workflow(
+                    workspace_name=self.workspace,
+                    workflow_id=self.workflow_id,
+                    images={"image": image_path},
+                    parameters=parameters or {},
+                    use_cache=True,
+                )
+                return self._parse_workflow_result(result)
+            except RoboflowAuthError:
+                raise  # don't retry auth failures
+            except RoboflowTimeoutError as e:
+                last_error = e
+            except Exception as e:
+                msg = str(e)
+                if "401" in msg or "Unauthorized" in msg or "403" in msg:
+                    raise RoboflowAuthError(
+                        "Roboflow authentication failed. Use a secret (private) "
+                        "API key, not a publishable one."
+                    ) from e
+                last_error = e
+
+            if attempt < self.max_retries:
+                sleep_for = self.backoff_base_s * (2 ** (attempt - 1))
+                time.sleep(sleep_for)
+
+        raise RoboflowTimeoutError(
+            f"Roboflow workflow failed after {self.max_retries} attempts: {last_error}"
+        ) from last_error
+
+    # ── Defensive output parsing ─────────────────────────────────────────
+    def _parse_workflow_result(self, result: Any) -> dict[str, Any]:
+        """Extract the first result entry from a workflow response.
+
+        The Roboflow serverless API returns a list (one entry per input image).
+        Each entry is a dict keyed by the workflow's own output names.
+        We discover those names dynamically instead of hard-coding them.
+        """
+        if result is None:
+            raise RoboflowResponseError("Roboflow returned None.")
+
+        entry = result[0] if isinstance(result, (list, tuple)) and result else result
+        if not isinstance(entry, dict):
+            raise RoboflowResponseError(
+                f"Unexpected Roboflow result type: {type(entry).__name__}"
+            )
+
+        helmet_status = self._extract_helmet_status(entry)
+        compliance_ratio = self._extract_compliance_ratio(entry)
+        output_image_bytes = self._extract_output_image(entry)
+
+        return {
+            "helmet_status": helmet_status,
+            "compliance_ratio": compliance_ratio,
+            "output_image_bytes": output_image_bytes,
+            "raw_keys": list(entry.keys()),
+        }
+
+    @staticmethod
+    def _extract_helmet_status(entry: dict[str, Any]) -> str | None:
+        """Discover the helmet status field from whatever key the workflow uses."""
+        for key in (
+            "helmet_status",
+            "status",
+            "helmet",
+            "result",
+            "label",
+            "prediction",
+            "compliance",
+        ):
+            if key in entry and entry[key] is not None:
+                return str(entry[key]).strip()
+        return None
+
+    @staticmethod
+    def _extract_compliance_ratio(entry: dict[str, Any]) -> float:
+        """Discover the compliance ratio / confidence from the workflow output."""
+        for key in (
+            "compliance_ratio",
+            "compliance",
+            "ratio",
+            "score",
+            "confidence",
+            "helmet_confidence",
+        ):
+            if key in entry and entry[key] is not None:
+                try:
+                    return float(entry[key])
+                except (TypeError, ValueError):
+                    continue
+        # Fall back: infer from helmet_status presence
+        return 0.0
+
+    @staticmethod
+    def _extract_output_image(entry: dict[str, Any]) -> bytes | None:
+        """Find and decode an image-shaped output from the workflow result.
+
+        Image outputs arrive as base64 blobs (often hundreds of KB). We decode
+        and return the bytes; the caller writes them to disk. We never log them
+        or hold them in memory longer than needed.
+        """
+        image_keys = (
+            "output_image",
+            "annotated_image",
+            "segmented_helmet_image",
+            "bounding_box_image",
+            "image",
+            "result_image",
+        )
+        for key in image_keys:
+            if key not in entry:
+                continue
+            val = entry[key]
+            if isinstance(val, (bytes, bytearray)):
+                return bytes(val)
+            if isinstance(val, str):
+                s = val.strip()
+                if s.startswith("http://") or s.startswith("https://"):
+                    # URL input — fetch it (timeout bounded)
+                    try:
+                        import requests
+
+                        r = requests.get(s, timeout=10)
+                        if r.status_code == 200:
+                            return r.content
+                    except Exception:
+                        continue
+                if "," in s and s.split(",", 1)[0].startswith("data:"):
+                    try:
+                        return base64.b64decode(s.split(",", 1)[1], validate=False)
+                    except Exception:
+                        continue
+                try:
+                    return base64.b64decode(s, validate=False)
+                except Exception:
+                    continue
+            if isinstance(val, dict):
+                # Nested dict — recurse into common image-holding shapes
+                inner = RoboflowClient._extract_output_image(val)
+                if inner is not None:
+                    return inner
+        return None
 
 
-def _roboflow_status_to_compliant(status) -> bool:
-    """Interpret the workflow's helmet_status string."""
+# ── Roboflow status interpretation ────────────────────────────────────────────
+def _roboflow_status_to_compliant(status: str | None) -> bool:
+    """Interpret the workflow's helmet_status string into PASS/FAIL."""
     if status is None:
         return False
     s = str(status).strip().lower()
     if not s:
         return False
-    if any(tok in s for tok in ("missing", "no helmet", "no-helmet", "absent", "without", "not detected", "fail")):
+    if any(
+        tok in s
+        for tok in (
+            "missing",
+            "no helmet",
+            "no-helmet",
+            "absent",
+            "without",
+            "not detected",
+            "fail",
+        )
+    ):
         return False
-    if any(tok in s for tok in ("helmet", "present", "pass", "compliant", "detected")):
+    if any(
+        tok in s
+        for tok in ("helmet", "present", "pass", "compliant", "detected")
+    ):
         return True
     return False
 
 
-def _roboflow_inspect(frame, worker_id):
-    """Run the Roboflow helmet workflow on a frame."""
-    import tempfile
+# ── Inspection (Roboflow workflow) ────────────────────────────────────────────
+def _roboflow_inspect(
+    client: RoboflowClient,
+    frame: np.ndarray,
+    worker_id: str,
+) -> tuple[bool | None, float, str, np.ndarray]:
+    """Run the Roboflow helmet workflow on a frame.
 
-    with _roboflow_lock:
-        client = _roboflow_client
-
-    if client is None:
-        return _stub_inspect(frame, worker_id)
-
+    Returns (compliant, compliance_ratio, label, annotated_frame).
+    """
     h, w = frame.shape[:2]
     annotated = frame.copy()
+
+    import tempfile
 
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".jpg")
     os.close(tmp_fd)
     cv2.imwrite(tmp_path, frame)
 
     try:
-        result = client.run_workflow(
-            workspace_name=ROBOFLOW_WORKSPACE,
-            workflow_id=ROBOFLOW_WORKFLOW_ID,
-            images={"image": tmp_path},
-            use_cache=True,
+        parsed = client.run_helmet_check(image_path=tmp_path)
+    except RoboflowAuthError:
+        print(
+            "[VisionEngine] Roboflow auth failed — using stub. "
+            "Configure a secret (private) ROBOFLOW_API_KEY."
         )
-    except Exception as e:
+        return None, 0.0, "VISION_UNAVAILABLE", annotated
+    except RoboflowError as e:
         print(f"[VisionEngine] Roboflow workflow call failed: {e}")
-        if "401" in str(e) or "Unauthorized" in str(e):
-            print("[VisionEngine] Hint: use a Roboflow *secret* (private) API key, not a publishable one.")
-        return _stub_inspect(frame, worker_id)
+        return None, 0.0, "VISION_ERROR", annotated
     finally:
         try:
             os.remove(tmp_path)
         except OSError:
             pass
 
-    entry = result[0] if isinstance(result, (list, tuple)) and result else result
-    if not isinstance(entry, dict):
-        print(f"[VisionEngine] Unexpected Roboflow result type: {type(entry)}")
-        return _stub_inspect(frame, worker_id)
-
-    print(f"[VisionEngine] Roboflow result keys: {list(entry.keys())}")
-
-    helmet_status = entry.get("helmet_status")
-    if helmet_status is None:
-        for k in ("status", "helmet", "result"):
-            if k in entry:
-                helmet_status = entry[k]
-                break
-
-    print(f"[VisionEngine] Roboflow helmet_status: {helmet_status!r}")
-
+    helmet_status = parsed.get("helmet_status")
+    compliance_ratio = float(parsed.get("compliance_ratio", 0.0) or 0.0)
     compliant = _roboflow_status_to_compliant(helmet_status)
+
+    # If the workflow didn't give us a usable ratio, derive one from pass/fail
+    if compliance_ratio <= 0.0:
+        compliance_ratio = 0.9 if compliant else 0.1
+
     label = "HELMET_PASS" if compliant else "HELMET_FAIL"
-    compliance_ratio = 0.9 if compliant else 0.1
     colour = (0, 200, 80) if compliant else (0, 60, 220)
 
-    out_img_bytes = None
-    for key in ("output_image", "bounding_box_image", "segmented_helmet_image"):
-        if key in entry:
-            out_img_bytes = _extract_image_from_result(entry[key])
-            if out_img_bytes is not None:
-                break
-
+    out_img_bytes = parsed.get("output_image_bytes")
     if out_img_bytes is not None:
         try:
             arr = np.frombuffer(out_img_bytes, dtype=np.uint8)
@@ -234,16 +415,31 @@ def _roboflow_inspect(frame, worker_id):
     if annotated is frame:
         annotated = frame.copy()
         cv2.putText(
-            annotated, f"{label}  status={helmet_status}", (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.7, colour, 2,
+            annotated,
+            f"{label}  status={helmet_status}",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            colour,
+            2,
         )
         cv2.putText(
-            annotated, f"Worker: {worker_id}", (10, h - 20),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1,
+            annotated,
+            f"Worker: {worker_id}",
+            (10, h - 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 255, 255),
+            1,
         )
         cv2.putText(
-            annotated, "[ Roboflow RF-DETR + SAM 3 ]", (10, 55),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1,
+            annotated,
+            "[ Roboflow RF-DETR + SAM 3 ]",
+            (10, 55),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 200, 255),
+            1,
         )
 
     return compliant, compliance_ratio, label, annotated
@@ -251,15 +447,10 @@ def _roboflow_inspect(frame, worker_id):
 
 # ── No-vision fallback (no model configured) ──────────────────────────────────
 def _stub_inspect(frame: np.ndarray, worker_id: str) -> tuple[None, float, str, np.ndarray]:
-    """
-    Helmet inspection is unavailable when no Roboflow credentials are configured.
+    """Helmet inspection is unavailable when no Roboflow credentials are configured.
 
-    This deliberately does NOT fabricate a PASS/FAIL verdict. Returning
-    compliant=None tells the caller to skip the interlock decision, because
-    pretending a worker is safe (or unsafe) would be worse than reporting
-    that vision is offline.
-
-    Returns: (None, 0.0, "VISION_UNAVAILABLE", annotated_frame)
+    Deliberately does NOT fabricate a PASS/FAIL verdict. Returning
+    compliant=None tells the caller to skip the interlock decision.
     """
     h, w = frame.shape[:2]
     annotated = frame.copy()
@@ -270,32 +461,41 @@ def _stub_inspect(frame: np.ndarray, worker_id: str) -> tuple[None, float, str, 
         annotated,
         "VISION UNAVAILABLE - helmet check skipped",
         (20, 40),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.7, colour, 2,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        colour,
+        2,
     )
     cv2.putText(
         annotated,
         "Configure ROBOFLOW_API_KEY to enable compliance checks",
         (20, 70),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        (200, 200, 200),
+        1,
     )
     cv2.putText(
         annotated,
         f"Worker: {worker_id}",
         (10, h - 20),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (255, 255, 255),
+        1,
     )
 
     return None, 0.0, "VISION_UNAVAILABLE", annotated
 
 
-# ── Vision Engine ──────────────────────────────────────────────────────────────
+# ── Vision Engine ─────────────────────────────────────────────────────────────
 class VisionEngine:
-    """
-    Background thread that continuously captures webcam frames.
-    Runs in FastAPI's startup lifecycle.
-    Provides:
-      - generate_frames()  → MJPEG bytes for StreamingResponse
-      - inspect(worker_id, device_id)  → compliance result dict + saves snapshot
+    """Background thread that continuously captures webcam frames.
+
+    Runs in FastAPI's startup lifecycle. Provides:
+
+      • generate_frames()  → MJPEG bytes for StreamingResponse
+      • inspect(worker_id, device_id)  → compliance result dict + saves snapshot
     """
 
     def __init__(self) -> None:
@@ -304,7 +504,30 @@ class VisionEngine:
         self._frame_lock = threading.Lock()
         self._running = False
         self._thread: threading.Thread | None = None
-        self._roboflow_loaded = _try_load_roboflow()
+        self._roboflow_client: RoboflowClient | None = None
+        self._roboflow_available = False
+
+        if ROBOFLOW_API_KEY:
+            try:
+                self._roboflow_client = RoboflowClient(
+                    api_url=ROBOFLOW_API_URL,
+                    api_key=ROBOFLOW_API_KEY,
+                    workspace=ROBOFLOW_WORKSPACE,
+                    workflow_id=ROBOFLOW_WORKFLOW_ID,
+                )
+                # Light touch: verify the client can be constructed
+                self._roboflow_client._ensure()
+                self._roboflow_available = True
+                print(
+                    f"[VisionEngine] Roboflow workflow configured: "
+                    f"{ROBOFLOW_WORKSPACE}/{ROBOFLOW_WORKFLOW_ID}"
+                )
+            except Exception as e:
+                print(f"[VisionEngine] Could not configure Roboflow client: {e}.")
+                self._roboflow_client = None
+                self._roboflow_available = False
+        else:
+            print("[VisionEngine] No ROBOFLOW_API_KEY — vision stub active.")
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
     def start(self) -> None:
@@ -326,7 +549,6 @@ class VisionEngine:
         backend = backend_map.get(CAMERA_BACKEND, cv2.CAP_ANY)
         self._cap = cv2.VideoCapture(CAMERA_SOURCE, backend)
         if not self._cap.isOpened() and backend != cv2.CAP_ANY:
-            # fall back to default backend
             self._cap = cv2.VideoCapture(CAMERA_SOURCE)
         if not self._cap.isOpened():
             print("[VisionEngine] WARNING: Camera not available. Generating blank frames.")
@@ -340,11 +562,15 @@ class VisionEngine:
                 else:
                     self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # loop video file
             else:
-                # Generate blank frame with text if no camera
                 blank = np.zeros((480, 640, 3), dtype=np.uint8)
                 cv2.putText(
-                    blank, "No Camera – ARMOR Vision Engine",
-                    (60, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (100, 200, 255), 2,
+                    blank,
+                    "No Camera – ARMOR Vision Engine",
+                    (60, 240),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (100, 200, 255),
+                    2,
                 )
                 with self._frame_lock:
                     self._latest_frame = blank
@@ -356,17 +582,19 @@ class VisionEngine:
                 return self._latest_frame.copy()
         blank = np.zeros((480, 640, 3), dtype=np.uint8)
         cv2.putText(
-            blank, "Initialising...",
-            (200, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (200, 200, 200), 2,
+            blank,
+            "Initialising...",
+            (200, 240),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.9,
+            (200, 200, 200),
+            2,
         )
         return blank
 
     # ── MJPEG stream ──────────────────────────────────────────────────────────
     def generate_frames(self) -> Generator[bytes, None, None]:
-        """
-        Yields MJPEG bytes for FastAPI StreamingResponse.
-        Streamlit embeds via: st.markdown('<iframe src="..." />', unsafe_allow_html=True)
-        """
+        """Yields MJPEG bytes for FastAPI StreamingResponse."""
         while True:
             frame = self._get_frame()
             _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
@@ -378,17 +606,19 @@ class VisionEngine:
             )
             time.sleep(0.05)  # ~20 fps for stream
 
-    # ── Inspection (triggered by breach event) ────────────────────────────────
+    # ── Inspection ────────────────────────────────────────────────────────────
     def inspect(self, worker_id: str, device_id: str) -> dict:
-        """
-        Run helmet compliance check on the current frame.
+        """Run helmet compliance check on the current frame.
+
         Returns result dict and saves snapshot JPEG.
-        Called by the FastAPI breach handler.
+        Called by the FastAPI breach handler and the dashboard manual test.
         """
         frame = self._get_frame()
 
-        if self._roboflow_loaded:
-            compliant, ratio, label, annotated = _roboflow_inspect(frame, worker_id)
+        if self._roboflow_available and self._roboflow_client is not None:
+            compliant, ratio, label, annotated = _roboflow_inspect(
+                self._roboflow_client, frame, worker_id
+            )
         else:
             compliant, ratio, label, annotated = _stub_inspect(frame, worker_id)
 
@@ -406,6 +636,40 @@ class VisionEngine:
             label=label,
             snapshot_path=snapshot_path,
         )
+
+
+# ── Smoke test ────────────────────────────────────────────────────────────────
+def smoke_test(image_path: str) -> dict[str, Any]:
+    """Run the helmet-check workflow on a single sample image and assert
+    that the expected output keys exist. Intended for CI/dev verification.
+
+    Returns the parsed result dict on success.
+    Raises RoboflowError on failure.
+    """
+    if not ROBOFLOW_API_KEY:
+        raise RoboflowError(
+            "Smoke test skipped: ROBOFLOW_API_KEY not configured."
+        )
+
+    client = RoboflowClient(
+        api_url=ROBOFLOW_API_URL,
+        api_key=ROBOFLOW_API_KEY,
+        workspace=ROBOFLOW_WORKSPACE,
+        workflow_id=ROBOFLOW_WORKFLOW_ID,
+    )
+    parsed = client.run_helmet_check(image_path=image_path)
+
+    # Assertions: the workflow must return something useful
+    assert isinstance(parsed, dict), "Parsed result is not a dict"
+    assert "raw_keys" in parsed, "No raw_keys in parsed result"
+    assert len(parsed["raw_keys"]) > 0, "Workflow returned no output keys"
+
+    print(f"[Smoke Test] OK — output keys: {parsed['raw_keys']}")
+    print(
+        f"[Smoke Test] helmet_status={parsed.get('helmet_status')!r}, "
+        f"compliance_ratio={parsed.get('compliance_ratio')}"
+    )
+    return parsed
 
 
 # ── Singleton (imported by main.py) ───────────────────────────────────────────

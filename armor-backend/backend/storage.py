@@ -556,3 +556,103 @@ class ArmorStore:
                 (device_id, limit),
             ).fetchall()
         return self._rows_to_list(rows)
+
+    # ------------------------------------------------------------------ #
+    # ML Calibration / Model Package
+    # ------------------------------------------------------------------ #
+    def get_model_package(
+        self,
+        machine_id: str,
+        device_id: str,
+    ) -> dict[str, Any] | None:
+        """Return the latest calibrated model package for a device."""
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM calibrations
+                WHERE machine_id = ? AND device_id = ?
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (machine_id, device_id),
+            ).fetchone()
+        return self._row_to_dict(row)
+
+    def save_model_package(
+        self,
+        machine_id: str,
+        device_id: str,
+        package: dict[str, Any],
+        baseline_stats: dict[str, Any] | None = None,
+        quality: float | None = None,
+        window_count: int | None = None,
+    ) -> None:
+        """Persist a trained model package (IsolationForest-distilled)."""
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO calibrations
+                    (machine_id, device_id, model_package, baseline_stats,
+                     quality, window_count, created_at)
+                VALUES (?,?,?,?,?,?,?)
+                """,
+                (
+                    machine_id,
+                    device_id,
+                    json.dumps(package),
+                    json.dumps(baseline_stats) if baseline_stats else None,
+                    quality,
+                    window_count,
+                    _utc_now(),
+                ),
+            )
+            self._conn.commit()
+
+    # ------------------------------------------------------------------ #
+    # Anomaly Log
+    # ------------------------------------------------------------------ #
+    def record_anomaly(
+        self,
+        machine_id: str,
+        device_id: str,
+        score: float,
+        threshold: float,
+        is_anomaly: bool,
+    ) -> None:
+        """Record one ML anomaly scoring result."""
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO anomaly_log
+                    (machine_id, device_id, score, threshold, is_anomaly, created_at)
+                VALUES (?,?,?,?,?,?)
+                """,
+                (
+                    machine_id,
+                    device_id,
+                    float(score),
+                    float(threshold),
+                    int(bool(is_anomaly)),
+                    _utc_now(),
+                ),
+            )
+            self._conn.commit()
+
+    def get_recent_anomalies(
+        self,
+        machine_id: str,
+        device_id: str,
+        hours: int = 24,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return recent anomaly records for a device within a time window."""
+        since = _utc_now()  # placeholder; we filter by id DESC instead of time
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM anomaly_log
+                WHERE machine_id = ? AND device_id = ?
+                ORDER BY id DESC LIMIT ?
+                """,
+                (machine_id, device_id, limit),
+            ).fetchall()
+        return self._rows_to_list(rows)

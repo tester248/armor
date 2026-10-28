@@ -1,18 +1,18 @@
 """
-ARMOR – Streamlit Operator Control Room
-========================================
+ARMOR – Streamlit Operator Control Room (Rewritten)
+=====================================================
 Active Real-Time Machine & Operator Response System
-Implements the web command center per:
-  - ARMOR_System_Architecture_and_Implementation_Plan.md (Section 4.3)
-  - ARMOR_24Hour_Work_Division_and_Roadmap.md (Landmine B mitigation)
 
-Features:
-  • High-impact dark cyberpunk / industrial safety command room styling
-  • Pulsing real-time safety alert banners (Normal / Breach / Lockout)
-  • Embedded low-latency Edge Vision MJPEG iframe (http://127.0.0.1:8000/video/stream)
-  • Real-time Plotly charts for ADXL345 vibration, INA219 current/power, DS18B20 temp
-  • Incident log table with interactive snapshot photo evidence inspector
-  • Manual emergency lockout & safety recovery controls
+Sections:
+  1. System Health & Sidebar Controls
+  2. Real Data Fetching (no synthetic fallbacks)
+  3. KPI Metric HUD
+  4. Subsystem Test Panel (per-subsystem manual tests)
+  5. Calibration & Predictive Maintenance Panel
+  6. Vision Panel (Live Camera / 3D Twin / Manual Helmet Test)
+  7. Live Telemetry Charts
+  8. Safety Incident Audit Log & Snapshot Inspector
+  9. WebSocket Live Feed & MQTT Debug
 """
 from __future__ import annotations
 
@@ -22,26 +22,31 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
-import plotly.graph_objects as go
 import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-# ── Config (Use 127.0.0.1 to avoid Windows IPv6 localhost delay) ──────────────
+# ── Backend API ────────────────────────────────────────────────────────────
+try:
+    from backend.vision import vision_engine
+    VISION_AVAILABLE = True
+except Exception:
+    vision_engine = None
+    VISION_AVAILABLE = False
+
+# ── Config ─────────────────────────────────────────────────────────────────
 API_BASE_URL = os.getenv("ARMOR_API_URL", "http://127.0.0.1:8000")
 DEFAULT_DEVICE_ID = os.getenv("ARMOR_DEVICE_ID", "machino_node_01")
 SNAPSHOTS_DIR = Path(os.getenv("SNAPSHOT_DIR", "data/snapshots"))
 
-# ── Page Configuration ────────────────────────────────────────────────────────
+# ── Page Configuration ─────────────────────────────────────────────────────
 st.set_page_config(
     page_title="ARMOR // Operator Control Room",
     page_icon=":material/shield:",
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
-# ── Custom CSS Design System ──────────────────────────────────────────────────
+# ── Custom CSS Design System ───────────────────────────────────────────────
 st.markdown(
     """
     <style>
@@ -72,7 +77,6 @@ st.markdown(
         border-right: 1px solid rgba(255, 255, 255, 0.08);
     }
 
-    /* Card Panels */
     .armor-panel {
         background: var(--armor-card-bg);
         border: 1px solid var(--armor-card-border);
@@ -83,7 +87,6 @@ st.markdown(
         margin-bottom: 16px;
     }
 
-    /* Metric HUD Cards */
     .hud-card {
         background: rgba(15, 23, 42, 0.85);
         border: 1px solid rgba(255, 255, 255, 0.08);
@@ -101,6 +104,7 @@ st.markdown(
     .hud-card.hud-green::before { background: var(--armor-green); }
     .hud-card.hud-red::before { background: var(--armor-red); }
     .hud-card.hud-amber::before { background: var(--armor-amber); }
+    .hud-card.hud-blue::before { background: var(--armor-cyan); }
 
     .hud-title {
         font-family: 'JetBrains Mono', monospace;
@@ -123,7 +127,6 @@ st.markdown(
         margin-top: 4px;
     }
 
-    /* Pulsing Alert Banners */
     .alert-banner-normal {
         background: linear-gradient(90deg, rgba(16, 185, 129, 0.15) 0%, rgba(6, 182, 212, 0.1) 100%);
         border: 1px solid var(--armor-green);
@@ -168,6 +171,17 @@ st.markdown(
         justify-content: space-between;
         margin-bottom: 20px;
     }
+    .alert-banner-info {
+        background: linear-gradient(90deg, rgba(6, 182, 212, 0.15) 0%, rgba(56, 189, 248, 0.1) 100%);
+        border: 1px solid var(--armor-cyan);
+        border-radius: 10px;
+        padding: 12px 20px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        box-shadow: 0 0 20px rgba(6, 182, 212, 0.25);
+        margin-bottom: 20px;
+    }
 
     @keyframes pulse-red {
         0% { box-shadow: 0 0 15px rgba(239, 68, 68, 0.4); }
@@ -175,7 +189,6 @@ st.markdown(
         100% { box-shadow: 0 0 15px rgba(239, 68, 68, 0.4); }
     }
 
-    /* Live Video Container */
     .video-frame-container {
         border-radius: 10px;
         overflow: hidden;
@@ -183,6 +196,14 @@ st.markdown(
         box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
         position: relative;
         background: #020617;
+    }
+    /* Force MJPEG stream iframe to fill its container (fix white space on camera feed) */
+    .video-frame-container iframe {
+        width: 100% !important;
+        height: 100% !important;
+        object-fit: cover !important;
+        object-position: center !important;
+        display: block !important;
     }
     .live-badge {
         position: absolute;
@@ -218,20 +239,14 @@ st.markdown(
         letter-spacing: 0.1em;
         margin-bottom: 8px;
     }
-    /* ── Streamlit Native Element Overrides ─────────────────────── */
 
-    /* Main container & block backgrounds */
     .stApp, .main .block-container {
         background-color: var(--armor-bg) !important;
         color: var(--armor-text-primary) !important;
     }
-
-    /* All text elements */
     h1, h2, h3, h4, h5, h6, p, span, label, li, td, th, div {
         color: var(--armor-text-primary) !important;
     }
-
-    /* Sidebar text */
     [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2,
     [data-testid="stSidebar"] h3, [data-testid="stSidebar"] p,
     [data-testid="stSidebar"] span, [data-testid="stSidebar"] label,
@@ -241,8 +256,6 @@ st.markdown(
     [data-testid="stSidebar"] .stCaption, [data-testid="stSidebar"] small {
         color: var(--armor-text-muted) !important;
     }
-
-    /* Tabs */
     .stTabs [data-baseweb="tab-list"] {
         gap: 4px;
         background-color: rgba(15, 23, 42, 0.6);
@@ -262,14 +275,6 @@ st.markdown(
         color: var(--armor-cyan) !important;
         border-bottom: 2px solid var(--armor-cyan);
     }
-    .stTabs [data-baseweb="tab-highlight"] {
-        background-color: var(--armor-cyan) !important;
-    }
-    .stTabs [data-baseweb="tab-border"] {
-        display: none;
-    }
-
-    /* Buttons */
     .stButton > button {
         background: linear-gradient(135deg, rgba(6, 182, 212, 0.2) 0%, rgba(56, 189, 248, 0.1) 100%) !important;
         color: #ffffff !important;
@@ -291,8 +296,6 @@ st.markdown(
         background: linear-gradient(135deg, rgba(239, 68, 68, 0.5) 0%, rgba(185, 28, 28, 0.35) 100%) !important;
         box-shadow: 0 0 16px rgba(239, 68, 68, 0.4);
     }
-
-    /* Text inputs & select boxes */
     .stTextInput input, .stSelectbox [data-baseweb="select"] {
         background-color: rgba(15, 23, 42, 0.8) !important;
         color: #ffffff !important;
@@ -303,31 +306,18 @@ st.markdown(
         background-color: rgba(15, 23, 42, 0.8) !important;
         color: #ffffff !important;
     }
-
-    /* Slider */
-    .stSlider [data-baseweb="slider"] {
-        color: var(--armor-cyan) !important;
-    }
-
-    /* Dataframe / table */
     [data-testid="stDataFrame"], .stDataFrame {
         border-radius: 8px;
         overflow: hidden;
     }
-
-    /* Success / Error / Warning / Info boxes */
     .stSuccess, .stAlert, [data-testid="stNotification"] {
         border-radius: 8px !important;
     }
-
-    /* Toast notifications */
     [data-testid="stToast"] {
         background-color: rgba(15, 23, 42, 0.95) !important;
         border: 1px solid rgba(56, 189, 248, 0.3) !important;
         backdrop-filter: blur(12px);
     }
-
-    /* Metric cards (native st.metric) */
     [data-testid="stMetricValue"] {
         color: #ffffff !important;
         font-family: 'Space Grotesk', sans-serif !important;
@@ -335,19 +325,14 @@ st.markdown(
     [data-testid="stMetricLabel"] {
         color: var(--armor-text-muted) !important;
     }
-
-    /* Plotly chart container */
     .js-plotly-plot .plotly .modebar {
         background: transparent !important;
     }
-
-    /* Scrollbar styling */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: rgba(0,0,0,0.2); }
     ::-webkit-scrollbar-thumb { background: rgba(6, 182, 212, 0.3); border-radius: 3px; }
     ::-webkit-scrollbar-thumb:hover { background: rgba(6, 182, 212, 0.5); }
 
-    /* System Status Bar */
     .system-status-bar {
         display: flex;
         flex-wrap: wrap;
@@ -381,26 +366,23 @@ st.markdown(
     .status-active .status-dot { background: #06b6d4; box-shadow: 0 0 8px #06b6d4; }
     .status-active { border-color: rgba(6, 182, 212, 0.4); color: #bae6fd; }
 
-    /* Icon styling */
     .armor-icon {
         display: inline-block;
         vertical-align: middle;
         flex-shrink: 0;
     }
-
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# ── Modern SVG Icon System ────────────────────────────────────────────────────
+# ── Modern SVG Icon System ─────────────────────────────────────────────────
 def icon_svg(name: str, color: str = "currentColor", size: int = 18, stroke_width: float = 2.0) -> str:
-    """Returns crisp inline SVG for industrial UI icons (Lucide/Feather standard)."""
     icons = {
         "shield": '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
         "shield_check": '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/>',
         "shield_alert": '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/>',
-        "siren": '<path d="M7 18v-6a5 5 0 1 1 10 0v6"/><path d="M5 21a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-1a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2z"/><path d="M21 12h1"/><path d="M18.5 4.5 19 4"/><path d="M2 12h1"/><path d="M12 2v1"/><path d="m4.929 4.929.707.707"/><path d="M12 12v6"/>',
+        "siren": '<path d="M7 18v-6a5 5 0 1 1 10 0v6"/><path d="M5 21a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-1a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2z"/><path d="M21 12h1"/><path d="M18.5 4.5l.5-.5"/><path d="M2 12h1"/><path d="M12 2v1"/><path d="m4.929 4.929.707.707"/><path d="M12 12v6"/>',
         "alert_triangle": '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
         "zap": '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
         "video": '<path d="m22 8-6 4 6 4V8Z"/><rect width="14" height="12" x="2" y="6" rx="2" ry="2"/>',
@@ -414,6 +396,12 @@ def icon_svg(name: str, color: str = "currentColor", size: int = 18, stroke_widt
         "x_circle": '<circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>',
         "refresh": '<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.85.83 6.72 2.24L21 8"/><path d="M21 3v5h-5"/>',
         "walk": '<circle cx="13.5" cy="4.5" r="2.5"/><path d="m8 22 4-11 3 3v8"/><path d="M18 11.5 14 8l-3 2-4-2"/>',
+        "calibration": '<circle cx="12" cy="12" r="9"/><path d="M7 11v3a4 4 0 0 0 4 4h3m-4-11V2m0 0a3 3 0 1 0-3 3m0 0"/><line x1="12" y1="12" x2="12" y2="18"/>',
+        "plug": '<path d="M5 3h3v4H5z"/><path d="M16 3h3v4h-3z"/><path d="M9 21V9"/><path d="M15 12h1"/><path d="M9 12H8"/><path d="M12 15v1"/><path d="M12 9v1"/>',
+        "bug": '<circle cx="8" cy="8" r="3"/><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.85.83 6.72 2.24L21 8"/><path d="M21 3v5h-5"/>',
+        "play": '<polygon points="5 3 19 12 5 21"/>',
+        "stop": '<rect x="6" y="6" width="12" height="12" rx="2" ry="2"/>',
+        "gear": '<path d="M20.04 9.04a5 5 0 0 0-3.07-3.07l-.07-.07a5 5 0 0 0-7.07 0l-.07.07a5 5 0 0 0 0 7.07l.07.07a5 5 0 0 0 7.07 0l.07-.07a5 5 0 0 0 3.07-3.07z"/><circle cx="12" cy="12" r="3"/>',
     }
     inner = icons.get(name, "")
     return (
@@ -421,12 +409,10 @@ def icon_svg(name: str, color: str = "currentColor", size: int = 18, stroke_widt
         f'fill="none" stroke="{color}" stroke-width="{stroke_width}" stroke-linecap="round" stroke-linejoin="round" '
         f'class="armor-icon" style="vertical-align: middle; display: inline-block;">{inner}</svg>'
     )
-
-
-# ── Resilient Fast API Helpers ────────────────────────────────────────────────
-def api_get(endpoint: str, params: dict | None = None) -> Any:
+# ── Resilient Fast API Helpers ─────────────────────────────────────────────
+def api_get(endpoint: str, params: dict | None = None, timeout: float = 0.6) -> Any:
     try:
-        r = requests.get(f"{API_BASE_URL}{endpoint}", params=params, timeout=0.6)
+        r = requests.get(f"{API_BASE_URL}{endpoint}", params=params, timeout=timeout)
         if r.status_code == 200:
             return r.json()
     except Exception:
@@ -434,20 +420,19 @@ def api_get(endpoint: str, params: dict | None = None) -> Any:
     return None
 
 
-def api_post(endpoint: str, json_data: dict | None = None, params: dict | None = None) -> Any:
+def api_post(endpoint: str, json_data: dict | None = None, params: dict | None = None, timeout: float = 1.5):
     try:
-        r = requests.post(f"{API_BASE_URL}{endpoint}", json=json_data, params=params, timeout=1.5)
+        r = requests.post(f"{API_BASE_URL}{endpoint}", json=json_data, params=params, timeout=timeout)
         return r.status_code, r.json() if r.content else {}
     except Exception as e:
         return 500, {"error": str(e)}
 
 
-# ── Step 1: Fast Single Health Check ──────────────────────────────────────────
-health = api_get("/api/v1/health")
+# ── Step 1: Fast Single Health Check ──────────────────────────────────────
+health = api_get("/api/v1/health", timeout=1.0)
 backend_online = health is not None and health.get("status") == "ok"
 
-
-# ── Sidebar Controls ──────────────────────────────────────────────────────────
+# ── Sidebar Controls ──────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown(
         f"""
@@ -476,7 +461,9 @@ with st.sidebar:
         st.caption(f"MQTT Broker: `{health.get('mqtt_broker')}` ({'Online' if mqtt_ok else 'Standby'})")
     else:
         st.error("● Gateway Offline")
-        st.caption("Start backend in terminal:<br>`python -m uvicorn --app-dir armor-backend backend.main:app --port 8000`", unsafe_allow_html=True)
+        st.caption("Start backend:<br>`python -m uvicorn --app-dir armor-backend backend.main:app --port 8000`", unsafe_allow_html=True)
+
+    st.markdown("---")
 
     st.markdown(
         f"""
@@ -506,7 +493,7 @@ with st.sidebar:
     if backend_online:
         workers_data = api_get("/api/v1/workers")
         if workers_data and "badges" in workers_data:
-            for b in workers_data["badges"][:3]:
+            for b in workers_data["badges"][:5]:
                 st.markdown(
                     f"- **{b.get('worker_id')}** ({b.get('worker_name', 'Operator')})<br>"
                     f"  <small style='color:#94a3b8;'>MAC: `{b.get('badge_mac')}`</small>",
@@ -520,32 +507,38 @@ with st.sidebar:
 # Only auto-refresh if backend is online and refresh is not paused
 if backend_online and refresh_rate > 0:
     st_autorefresh(interval=refresh_rate * 1000, key="armor_autorefresh")
-
-
-# ── Step 2: Fetch Data (real telemetry only, no synthetic fallbacks) ──────────
+# ── Step 2: Fetch Real Data (no synthetic fallbacks) ──────────────────────
 status_data: dict[str, Any] = {}
 samples: list[dict[str, Any]] = []
 incidents: list[dict[str, Any]] = []
+model_package: dict[str, Any] | None = None
+anomalies: list[dict[str, Any]] = []
 
 if backend_online:
-    status_data = api_get(f"/api/v1/status/{device_id}") or {}
-    telemetry_resp = api_get(f"/api/v1/telemetry/{device_id}", params={"limit": 60})
+    status_data = api_get(f"/api/v1/status/{device_id}", timeout=1.0) or {}
+    telemetry_resp = api_get(f"/api/v1/telemetry/{device_id}", params={"limit": 120}, timeout=1.0)
     samples = telemetry_resp.get("samples", []) if telemetry_resp else []
-    incidents_resp = api_get("/api/v1/incidents", params={"device_id": device_id, "limit": 20})
+    incidents_resp = api_get("/api/v1/incidents", params={"device_id": device_id, "limit": 50}, timeout=1.0)
     incidents = incidents_resp.get("incidents", []) if incidents_resp else []
+    model_resp = api_get(f"/api/v1/model/{device_id}", timeout=1.0)
+    if model_resp:
+        model_package = model_resp.get("model_package")
+    anomalies_resp = api_get("/api/v1/anomalies", params={"device_id": device_id, "limit": 20}, timeout=1.0)
+    anomalies = anomalies_resp.get("anomalies", []) if anomalies_resp else []
+
 
 def _reading(value: Any, fallback: Any = None) -> float | None:
-    """Return a real sensor reading, or fallback, or None. Never invent a fallback."""
-    try:
-        if value is not None:
+    """Return a real sensor reading, or fallback (from samples), or None. Never invent a value."""
+    if value is not None:
+        try:
             return float(value)
-    except (TypeError, ValueError):
-        pass
-    try:
-        if fallback is not None:
+        except (TypeError, ValueError):
+            pass
+    if fallback is not None:
+        try:
             return float(fallback)
-    except (TypeError, ValueError):
-        pass
+        except (TypeError, ValueError):
+            pass
     return None
 
 
@@ -557,6 +550,7 @@ current_rms = _reading(status_data.get("current_rms"), samples[-1].get("rms") if
 current_voltage = _reading(status_data.get("current_voltage_v"), samples[-1].get("voltage_v") if samples else None)
 current_ma = _reading(status_data.get("current_ma"), samples[-1].get("current_ma") if samples else None)
 current_temp = _reading(status_data.get("current_temp_c"), samples[-1].get("temperature_c") if samples else None)
+crest_factor = _reading(samples[-1].get("crest_factor") if samples else None)
 power_w = (
     round((current_voltage * current_ma) / 1000.0, 2)
     if current_voltage is not None and current_ma is not None
@@ -564,7 +558,7 @@ power_w = (
 )
 peak_ma = max([float(s.get("current_ma") or 0.0) for s in samples] or [0.0]) if samples else (current_ma or 0.0)
 
-# A status snapshot is "live" only if telemetry arrived in the last 10 seconds.
+# Telemetry staleness: live only if data arrived within last 10 seconds
 telemetry_stale = True
 _last_seen = status_data.get("last_telemetry_at")
 if not _last_seen and samples:
@@ -594,9 +588,10 @@ ma_text = f"{current_ma:.1f}" if current_ma is not None else "--"
 volt_text = f"{current_voltage:.1f}" if current_voltage is not None else "--"
 power_text = f"{power_w:.2f}" if power_w is not None else "--"
 temp_text = f"{current_temp:.1f}" if current_temp is not None else "--"
+cf_text = f"{crest_factor:.2f}" if crest_factor is not None else "--"
 
 
-# ── Live Connection & System Status Bar ───────────────────────────────────────
+# ── Live Connection & System Status Bar ───────────────────────────────────
 mqtt_connected = bool(health.get("mqtt_connected", False)) if backend_online else False
 mqtt_broker_str = health.get("mqtt_broker", "localhost:1883") if backend_online else "Unavailable"
 telemetry_count = len(samples)
@@ -605,7 +600,7 @@ gateway_class = "status-online" if backend_online else "status-offline"
 gateway_text = "GATEWAY: CONNECTED (127.0.0.1:8000)" if backend_online else "GATEWAY: OFFLINE (Port 8000)"
 
 mqtt_class = "status-online" if mqtt_connected else ("status-standby" if backend_online else "status-offline")
-mqtt_text = f"MQTT: CONNECTED ({mqtt_broker_str})" if mqtt_connected else ("MQTT: STANDBY (HTTP Ingest Active)" if backend_online else "MQTT: OFFLINE")
+mqtt_text = f"MQTT: CONNECTED ({mqtt_broker_str})" if mqtt_connected else ("MQTT: STANDBY (HTTP Ingest)" if backend_online else "MQTT: OFFLINE")
 
 if not backend_online:
     telem_class = "status-offline"
@@ -642,7 +637,7 @@ st.markdown(
 )
 
 
-# ── Top Safety Alert Banner ───────────────────────────────────────────────────
+# ── Top Safety Alert Banner ───────────────────────────────────────────────
 if not backend_online:
     st.markdown(
         f"""
@@ -740,7 +735,7 @@ else:
     )
 
 
-# ── KPI Metric HUD (4 Columns) ────────────────────────────────────────────────
+# ── KPI Metric HUD (4 Columns) ────────────────────────────────────────────
 c1, c2, c3, c4 = st.columns(4)
 
 with c1:
@@ -753,12 +748,12 @@ with c1:
         hud_class = "hud-red"
         val_color = "#ef4444"
         val_text = "LOCKED"
-        sub_text = "L298N ENA: GPIO 14 LOW (0V)"
+        sub_text = "L298N ENA: GPIO 25 LOW (0V)"
     elif motor_state == "RUNNING":
         hud_class = "hud-green"
         val_color = "#10b981"
         val_text = "RUNNING"
-        sub_text = "L298N ENA: GPIO 14 HIGH (5V)"
+        sub_text = "L298N ENA: GPIO 25 HIGH (5V)"
     else:
         hud_class = ""
         val_color = "#38bdf8"
@@ -819,95 +814,370 @@ with c4:
         <div class="hud-card {hud_class}">
             <div class="hud-title">DS18B20 Surface Temp</div>
             <div class="hud-value">{temp_text} <span style="font-size:1rem; font-weight:400; color:#94a3b8;">°C</span></div>
-            <div class="hud-sub">Thermal boundary: &lt;65.0°C</div>
+            <div class="hud-sub">Crest: {cf_text} | Thermal boundary: &lt;65.0°C</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 st.markdown("<br>", unsafe_allow_html=True)
+import pandas as pd
 
+def _build_df(samples):
+    if not samples:
+        return None
+    df = pd.DataFrame(samples)
+    if "ts" in df.columns:
+        ts_dt = pd.to_datetime(df["ts"], errors="coerce")
+        if ts_dt.isna().all() or ts_dt.isna().sum() > len(df) // 2:
+            try:
+                numeric_ts = pd.to_numeric(df["ts"], errors="coerce")
+                if numeric_ts.max() < 1e9:
+                    ts_dt = pd.to_datetime(numeric_ts, unit="s", errors="coerce")
+                else:
+                    ts_dt = pd.to_datetime(numeric_ts, unit="ms", errors="coerce")
+            except Exception:
+                ts_dt = pd.date_range(end=datetime.now(timezone.utc), periods=len(df), freq="1s")
+        df["ts_dt"] = ts_dt
+    else:
+        df["ts_dt"] = pd.date_range(end=datetime.now(timezone.utc), periods=len(df), freq="1s")
+    return df
 
-# ── Main 2-Column Split View: Edge Vision (Left) & Real-time Charts (Right) ───
-left_col, right_col = st.columns([1, 1], gap="medium")
+def _plot_chart(tab, df, chart_type):
+    try:
+        import plotly.graph_objects as go
+        fig = go.Figure()
+        if chart_type == "vibe":
+            fig.add_trace(
+                go.Scatter(
+                    x=df["ts_dt"],
+                    y=df["rms"],
+                    mode="lines+markers",
+                    name="RMS Vibration (g)",
+                    line=dict(color="#38bdf8", width=2.5),
+                    marker=dict(size=4),
+                )
+            )
+            if "crest_factor" in df.columns:
+                fig.add_trace(
+                    go.Scatter(
+                        x=df["ts_dt"],
+                        y=df["crest_factor"],
+                        mode="lines",
+                        name="Crest Factor",
+                        line=dict(color="#f59e0b", width=1.5, dash="dot"),
+                        yaxis="y2",
+                    )
+                )
+            fig.add_hline(
+                y=0.15,
+                line_dash="dash",
+                line_color="#ef4444",
+                annotation_text="Alarm Threshold (0.15g)",
+                annotation_position="top left",
+            )
+            fig.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(15,23,42,0.6)",
+                font=dict(color="#94a3b8", family="Inter"),
+                margin=dict(l=20, r=20, t=25, b=25),
+                height=300,
+                legend=dict(orientation="h", y=1.1, x=0),
+                xaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)"),
+                yaxis=dict(title="Vibration (g)", showgrid=True, gridcolor="rgba(255,255,255,0.05)"),
+                yaxis2=dict(title="Crest Factor", overlaying="y", side="right", showgrid=False),
+            )
+        elif chart_type == "pwr":
+            fig.add_trace(
+                go.Scatter(
+                    x=df["ts_dt"],
+                    y=df["current_ma"],
+                    mode="lines",
+                    name="Current (mA)",
+                    fill="tozeroy",
+                    fillcolor="rgba(16, 185, 129, 0.15)",
+                    line=dict(color="#10b981", width=2),
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=df["ts_dt"],
+                    y=df["voltage_v"],
+                    mode="lines",
+                    name="Bus Voltage (V)",
+                    line=dict(color="#38bdf8", width=1.5),
+                    yaxis="y2",
+                )
+            )
+            fig.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(15,23,42,0.6)",
+                font=dict(color="#94a3b8", family="Inter"),
+                margin=dict(l=20, r=20, t=25, b=25),
+                height=300,
+                legend=dict(orientation="h", y=1.1, x=0),
+                xaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)"),
+                yaxis=dict(title="Current (mA)", showgrid=True, gridcolor="rgba(255,255,255,0.05)"),
+                yaxis2=dict(title="Voltage (V)", overlaying="y", side="right", showgrid=False),
+            )
+        elif chart_type == "temp":
+            fig.add_trace(
+                go.Scatter(
+                    x=df["ts_dt"],
+                    y=df["temperature_c"],
+                    mode="lines+markers",
+                    name="Motor Temperature (°C)",
+                    line=dict(color="#f43f5e", width=2.5),
+                    marker=dict(size=4),
+                )
+            )
+            fig.add_hline(
+                y=55.0,
+                line_dash="dash",
+                line_color="#f59e0b",
+                annotation_text="Thermal Alert (55°C)",
+            )
+            fig.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(15,23,42,0.6)",
+                font=dict(color="#94a3b8", family="Inter"),
+                margin=dict(l=20, r=20, t=25, b=25),
+                height=300,
+                xaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)"),
+                yaxis=dict(title="Temperature (°C)", showgrid=True, gridcolor="rgba(255,255,255,0.05)"),
+            )
+        with tab:
+            st.plotly_chart(fig, use_container_width=True)
+    except Exception as e:
+        with tab:
+            st.error(f"{chart_type} chart error: {e}")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LEFT COLUMN: Embedded MJPEG Edge Vision Stream
-# ─────────────────────────────────────────────────────────────────────────────
-with left_col:
-    st.markdown(
-        f"""
-        <div class="armor-header">
-            {icon_svg('video', color='#06b6d4', size=22)}
-            <span>Edge Vision Safety Inspection</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
+def _render_charts(samples, device_id):
+    """Render telemetry charts inside a column context."""
+    chart_tab1, chart_tab2, chart_tab3 = st.tabs(
+        ["Vibration (ADXL345)", "Power & Load (INA219)", "Temperature (DS18B20)"]
     )
-    view_mode = st.radio(
-        "View Mode",
-        options=["Live Camera", "3D Digital Twin"],
-        horizontal=True,
-        label_visibility="collapsed",
-    )
+    df = _build_df(samples)
+    if df is not None:
+        _plot_chart(chart_tab1, df, "vibe")
+        _plot_chart(chart_tab2, df, "pwr")
+        _plot_chart(chart_tab3, df, "temp")
+    else:
+        with chart_tab1:
+            st.info("Awaiting telemetry stream from ESP32 machine node via MQTT.")
+        with chart_tab2:
+            st.info("Awaiting current & voltage readings from INA219.")
+        with chart_tab3:
+            st.info("Awaiting temperature readings from DS18B20.")
 
-    if backend_online:
-        if view_mode == "Live Camera":
+def _render_charts_in_tabs(tab1, tab2, tab3, samples, device_id):
+    """Render telemetry charts into pre-created tabs (full-width twin mode)."""
+    df = _build_df(samples)
+    if df is not None:
+        _plot_chart(tab1, df, "vibe")
+        _plot_chart(tab2, df, "pwr")
+        _plot_chart(tab3, df, "temp")
+    else:
+        with tab1:
+            st.info("Awaiting telemetry stream from ESP32 machine node via MQTT.")
+        with tab2:
+            st.info("Awaiting current & voltage readings from INA219.")
+        with tab3:
+            st.info("Awaiting temperature readings from DS18B20.")
+
+
+# MAIN VIEW: Edge Vision Safety Inspection
+# ════════════════════════════════════════════════════════════════════════════════
+
+st.markdown(
+    f"""
+    <div class="armor-header">
+        {icon_svg('video', color='#06b6d4', size=22)}
+        <span>Edge Vision Safety Inspection</span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+view_mode = st.radio(
+    "View Mode",
+    options=["Live Camera", "3D Digital Twin"],
+    horizontal=True,
+    label_visibility="collapsed",
+    key="vision_view_mode",
+)
+
+if backend_online:
+    if view_mode == "Live Camera":
+        # Two columns: camera left at natural size, charts right
+        cam_col, chart_col = st.columns([1, 1], gap="medium")
+
+        with cam_col:
             stream_url = f"{API_BASE_URL}/video/stream"
             st.markdown(
                 f"""
-                <div class="video-frame-container" style="height: 380px;">
+                <div class="video-frame-container" style="height: 420px; aspect-ratio: 4/3;">
                     <div class="live-badge">LIVE AI STREAM</div>
                     <iframe
                         src="{stream_url}"
                         width="100%"
                         height="100%"
-                        style="border:none; display:block; background:#000;"
+                        style="border:none; display:block; background:#000; object-fit: cover;"
                         scrolling="no"
                     ></iframe>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
-        else:
-            twin_url = f"{API_BASE_URL}/twin?device_id={device_id}"
-            st.markdown(
-                f"""
-                <div class="video-frame-container" style="height: 380px;">
-                    <div class="live-badge" style="background:rgba(6,182,212,0.9);">3D DIGITAL TWIN</div>
-                    <iframe
-                        src="{twin_url}"
-                        width="100%"
-                        height="100%"
-                        style="border:none; display:block; background:#0b0f19;"
-                        scrolling="no"
-                    ></iframe>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+
+        with chart_col:
+            _render_charts(samples, device_id)
+
     else:
+        # Full-width digital twin
+        twin_url = f"{API_BASE_URL}/twin?device_id={device_id}"
         st.markdown(
             f"""
-            <div class="video-frame-container" style="height: 380px; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:20px;">
-                <div style="margin-bottom: 12px; opacity: 0.7;">
-                    {icon_svg('video', color='#94a3b8', size=44)}
-                </div>
-                <div style="font-weight: 700; font-size: 1.1rem; color: #ffffff;">Stream Offline</div>
-                <div style="color: #94a3b8; font-size: 0.85rem; max-width: 380px; margin-top: 6px;">
-                    Start the FastAPI backend on port 8000 to connect.
-                </div>
+            <div class="video-frame-container" style="height: 560px;">
+                <div class="live-badge" style="background:rgba(6,182,212,0.9);">3D DIGITAL TWIN</div>
+                <iframe
+                    src="{twin_url}"
+                    width="100%"
+                    height="100%"
+                    style="border:none; display:block; background:#0b0f19; object-fit: cover;"
+                    scrolling="no"
+                ></iframe>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # Full-width charts below twin
+        chart_tab1, chart_tab2, chart_tab3 = st.tabs(
+            ["Vibration (ADXL345)", "Power & Load (INA219)", "Temperature (DS18B20)"]
+        )
+        _render_charts_in_tabs(chart_tab1, chart_tab2, chart_tab3, samples, device_id)
+
+else:
+    st.markdown(
+        f"""
+        <div class="video-frame-container" style="height: 420px; aspect-ratio: 4/3; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:20px;">
+            <div style="margin-bottom: 12px; opacity: 0.7;">
+                {icon_svg('video', color='#94a3b8', size=44)}
+            </div>
+            <div style="font-weight: 700; font-size: 1.1rem; color: #ffffff;">Stream Offline</div>
+            <div style="color: #94a3b8; font-size: 0.85rem; max-width: 380px; margin-top: 6px;">
+                Start the FastAPI backend on port 8000 to connect.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# SUBSYSTEM TEST PANEL — test every subsystem individually
+# ═══════════════════════════════════════════════════════════════════════════════
+st.markdown(
+    f"""
+    <div class="armor-header">
+        {icon_svg('bug', color='#f59e0b', size=22)}
+        <span>Subsystem Test Panel</span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+st.caption("Test each subsystem independently. No badge proximity breach required.")
+
+# Initialize session state for test results
+if "test_results" not in st.session_state:
+    st.session_state.test_results = {}
+
+test_cols = st.columns(2)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Test 1: Vision / Helmet Inspection
+# ══════════════════════════════════════════════════════════════════════════════
+with test_cols[0]:
+    st.markdown("### Vision — Helmet Inspection")
+    st.caption("Calls `vision_engine.inspect()` directly (bypasses badge trigger).")
+
+    test_worker_id = st.text_input(
+        "Worker ID",
+        value=os.getenv("WORKER_TEST_ID", "WORKER_EMP_402"),
+        key="vision_worker_id",
+    )
+
+    if st.button(
+        "Run Helmet Inspection",
+        key="btn_vision_test",
+        type="secondary",
+        use_container_width=True,
+        disabled=not (backend_online and VISION_AVAILABLE),
+    ):
+        with st.spinner("Running helmet inspection..."):
+            try:
+                result = vision_engine.inspect(worker_id=test_worker_id, device_id=device_id)
+                st.session_state.test_results["vision"] = result
+                st.rerun()
+            except Exception as e:
+                st.error(f"Vision inspection failed: {e}")
+                st.session_state.test_results["vision"] = {
+                    "compliant": None,
+                    "label": "ERROR",
+                    "compliance_ratio": 0.0,
+                    "worker_id": test_worker_id,
+                    "snapshot_path": None,
+                }
+
+    if "vision" in st.session_state.test_results:
+        r = st.session_state.test_results["vision"]
+        compliant = r.get("compliant")
+        ratio = r.get("compliance_ratio", 0.0)
+        label = r.get("label", "UNKNOWN")
+        snapshot = r.get("snapshot_path")
+        ts = r.get("timestamp", "")
+
+        if compliant is None:
+            st.error(f"🔴 VISION UNAVAILABLE — {label}")
+            st.caption("No ROBOFLOW_API_KEY configured or model not loaded. Interlock will NOT auto-trigger.")
+        elif compliant:
+            st.success(f"✅ HELMET PASS — compliance ratio: {ratio:.1%}")
+            st.caption(f"Worker: {r.get('worker_id')} | Time: {ts[:19]}")
+            if snapshot and Path(snapshot).exists():
+                st.image(snapshot, caption="Helmet Inspection Snapshot", use_container_width=True)
+        else:
+            st.error(f"❌ HELMET FAIL — compliance ratio: {ratio:.1%}")
+            st.caption(f"Worker: {r.get('worker_id')} | Time: {ts[:19]}")
+            if snapshot and Path(snapshot).exists():
+                st.image(snapshot, caption="Helmet Inspection Snapshot", use_container_width=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    btn_col1, btn_col2 = st.columns(2)
 
-    with btn_col1:
-        if st.button("EMERGENCY LOCKOUT", icon=":material/bolt:", use_container_width=True, type="primary", disabled=not backend_online):
+    if not (backend_online and VISION_AVAILABLE):
+        reason = []
+        if not backend_online:
+            reason.append("backend offline")
+        if not VISION_AVAILABLE:
+            reason.append("vision engine import failed")
+        st.caption('Button disabled: ' + ', '.join(reason))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Test 2: Motor / Interlock
+# ══════════════════════════════════════════════════════════════════════════════
+with test_cols[1]:
+    st.markdown("### Motor — Interlock Control")
+    st.caption("Manually engage or release the safety interlock (L298N ENA GPIO 25).")
+
+    mcol1, mcol2 = st.columns(2)
+    with mcol1:
+        if st.button(
+            "EMERGENCY LOCKOUT",
+            key="btn_lockout",
+            type="primary",
+            use_container_width=True,
+            disabled=not backend_online,
+        ):
             code, resp = api_post(
                 "/api/v1/interlock",
                 json_data={
@@ -920,11 +1190,19 @@ with left_col:
             )
             if code == 200:
                 st.toast("EMERGENCY LOCKOUT ENGAGED!", icon=":material/dangerous:")
-                time.sleep(0.3)
+                st.session_state.test_results["motor"] = {"command": "LOCKOUT", "status": "sent"}
                 st.rerun()
+            else:
+                st.error(f"Lockout failed: {resp}")
 
-    with btn_col2:
-        if st.button("RESET INTERLOCK", icon=":material/restart_alt:", use_container_width=True, disabled=not backend_online):
+    with mcol2:
+        if st.button(
+            "RESET INTERLOCK",
+            key="btn_reset",
+            type="secondary",
+            use_container_width=True,
+            disabled=not backend_online,
+        ):
             code, resp = api_post(
                 "/api/v1/interlock",
                 json_data={
@@ -937,166 +1215,287 @@ with left_col:
             )
             if code == 200:
                 st.toast("Cell interlock reset to RUNNING.", icon=":material/check_circle:")
-                time.sleep(0.3)
+                st.session_state.test_results["motor"] = {"command": "RESET", "status": "sent"}
                 st.rerun()
+            else:
+                st.error(f"Reset failed: {resp}")
 
+    # Show current motor state from real data
+    st.caption(f"Current motor state: **{motor_state}** | Interlock: **{'ACTIVE' if interlock_active else 'INACTIVE'}**")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# RIGHT COLUMN: Plotly Live Telemetry Charts
-# ─────────────────────────────────────────────────────────────────────────────
-with right_col:
-    st.markdown(
-        f"""
-        <div class="armor-header">
-            {icon_svg('trending_up', color='#06b6d4', size=22)}
-            <span>Predictive Maintenance Telemetry</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    st.markdown("<br>", unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Test 3: Proximity Breach Simulation
+# ══════════════════════════════════════════════════════════════════════════════
+with test_cols[0]:
+    st.markdown("### Proximity — Breach Simulation")
+    st.caption("Simulate a worker entering the 1.5m danger perimeter. Triggers vision inspection.")
+
+    breach_worker_id = st.text_input(
+        "Worker ID for breach",
+        value="WORKER_EMP_402",
+        key="breach_worker_id",
+    )
+    breach_badge_mac = st.text_input(
+        "Badge MAC",
+        value="24:6F:28:AB:C1:02",
+        key="breach_badge_mac",
     )
 
-    chart_tab1, chart_tab2, chart_tab3 = st.tabs(
-        ["Vibration (ADXL345)", "Power & Load (INA219)", "Temperature (DS18B20)"]
-    )
+    if st.button(
+        "Simulate Proximity Breach",
+        key="btn_breach_test",
+        type="secondary",
+        use_container_width=True,
+        disabled=not backend_online,
+    ):
+        with st.spinner("Triggering proximity breach..."):
+            code, resp = api_post(
+                "/api/v1/breach",
+                json_data={
+                    "device_id": device_id,
+                    "worker_id": breach_worker_id,
+                    "badge_mac": breach_badge_mac,
+                    "rssi_raw": -55.0,
+                    "rssi_smoothed": -55.0,
+                    "distance_est_m": 0.8,
+                },
+            )
+            if code == 202:
+                st.toast(f"Proximity breach triggered for {breach_worker_id}", icon=":material/alert_triangle:")
+                st.session_state.test_results["proximity"] = {
+                    "worker_id": breach_worker_id,
+                    "badge_mac": breach_badge_mac,
+                    "status": "triggered",
+                }
+                st.rerun()
+            else:
+                st.error(f"Breach simulation failed: {resp}")
 
-    if samples:
-        df = pd.DataFrame(samples)
-        # Robust timestamp parsing (handles ISO-8601, unix epoch ms, or ESP32 millis strings)
-        if "ts" in df.columns:
-            ts_dt = pd.to_datetime(df["ts"], errors="coerce")
-            if ts_dt.isna().all() or ts_dt.isna().sum() > len(df) // 2:
-                try:
-                    numeric_ts = pd.to_numeric(df["ts"], errors="coerce")
-                    if numeric_ts.max() < 1e9:
-                        ts_dt = pd.date_range(end=datetime.now(timezone.utc), periods=len(df), freq="1s")
-                    else:
-                        ts_dt = pd.to_datetime(numeric_ts, unit="ms", errors="coerce")
-                except Exception:
-                    ts_dt = pd.date_range(end=datetime.now(timezone.utc), periods=len(df), freq="1s")
-            df["ts_dt"] = ts_dt
+    if "proximity" in st.session_state.test_results:
+        pr = st.session_state.test_results["proximity"]
+        st.info(f"Breach simulated: {pr['worker_id']} ({pr['badge_mac']}) — status: {pr['status']}")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Test 4: Vibration / Anomaly Scoring
+# ══════════════════════════════════════════════════════════════════════════════
+with test_cols[1]:
+    st.markdown("### Vibration — Anomaly Scoring")
+    st.caption("Check latest ML anomaly score against calibrated model.")
+
+    if st.button(
+        "Check Anomaly Score",
+        key="btn_anomaly_test",
+        type="secondary",
+        use_container_width=True,
+        disabled=not backend_online,
+    ):
+        latest_anom = anomalies[0] if anomalies else None
+        st.session_state.test_results["vibration"] = latest_anom
+
+    if "vibration" in st.session_state.test_results:
+        an = st.session_state.test_results["vibration"]
+        if an:
+            score = an.get("anomaly_score", 0.0)
+            threshold = an.get("threshold", 0.0)
+            is_anom = bool(an.get("is_anomaly", False))
+            if is_anom:
+                st.error(f"❌ ANOMALY DETECTED — score {score:.3f} >= threshold {threshold:.3f}")
+            else:
+                st.success(f"✅ NOMINAL — score {score:.3f} < threshold {threshold:.3f}")
+            st.caption(f"Recorded: {an.get('recorded_at', 'N/A')[:19]}")
         else:
-            df["ts_dt"] = pd.date_range(end=datetime.now(timezone.utc), periods=len(df), freq="1s")
-
-        with chart_tab1:
-            fig_vibe = go.Figure()
-            fig_vibe.add_trace(
-                go.Scatter(
-                    x=df["ts_dt"],
-                    y=df["rms"],
-                    mode="lines+markers",
-                    name="RMS Vibration (g)",
-                    line=dict(color="#38bdf8", width=2.5),
-                    marker=dict(size=4),
-                )
-            )
-            if "crest_factor" in df.columns:
-                fig_vibe.add_trace(
-                    go.Scatter(
-                        x=df["ts_dt"],
-                        y=df["crest_factor"],
-                        mode="lines",
-                        name="Crest Factor",
-                        line=dict(color="#f59e0b", width=1.5, dash="dot"),
-                        yaxis="y2",
-                    )
-                )
-
-            fig_vibe.add_hline(
-                y=0.15,
-                line_dash="dash",
-                line_color="#ef4444",
-                annotation_text="Alarm Threshold (0.15g)",
-                annotation_position="top left",
-            )
-
-            fig_vibe.update_layout(
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(15,23,42,0.6)",
-                font=dict(color="#94a3b8", family="Inter"),
-                margin=dict(l=20, r=20, t=25, b=25),
-                height=320,
-                legend=dict(orientation="h", y=1.1, x=0),
-                xaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)"),
-                yaxis=dict(title="Vibration (g)", showgrid=True, gridcolor="rgba(255,255,255,0.05)"),
-                yaxis2=dict(title="Crest Factor", overlaying="y", side="right", showgrid=False),
-            )
-            st.plotly_chart(fig_vibe, use_container_width=True)
-
-        with chart_tab2:
-            fig_pwr = go.Figure()
-            fig_pwr.add_trace(
-                go.Scatter(
-                    x=df["ts_dt"],
-                    y=df["current_ma"],
-                    mode="lines",
-                    name="Current (mA)",
-                    fill="tozeroy",
-                    fillcolor="rgba(16, 185, 129, 0.15)",
-                    line=dict(color="#10b981", width=2),
-                )
-            )
-            fig_pwr.add_trace(
-                go.Scatter(
-                    x=df["ts_dt"],
-                    y=df["voltage_v"],
-                    mode="lines",
-                    name="Bus Voltage (V)",
-                    line=dict(color="#38bdf8", width=1.5),
-                    yaxis="y2",
-                )
-            )
-            fig_pwr.update_layout(
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(15,23,42,0.6)",
-                font=dict(color="#94a3b8", family="Inter"),
-                margin=dict(l=20, r=20, t=25, b=25),
-                height=320,
-                legend=dict(orientation="h", y=1.1, x=0),
-                xaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)"),
-                yaxis=dict(title="Current (mA)", showgrid=True, gridcolor="rgba(255,255,255,0.05)"),
-                yaxis2=dict(title="Voltage (V)", overlaying="y", side="right", showgrid=False),
-            )
-            st.plotly_chart(fig_pwr, use_container_width=True)
-
-        with chart_tab3:
-            fig_temp = go.Figure()
-            fig_temp.add_trace(
-                go.Scatter(
-                    x=df["ts_dt"],
-                    y=df["temperature_c"],
-                    mode="lines+markers",
-                    name="Motor Temperature (°C)",
-                    line=dict(color="#f43f5e", width=2.5),
-                    marker=dict(size=4),
-                )
-            )
-            fig_temp.add_hline(
-                y=55.0,
-                line_dash="dash",
-                line_color="#f59e0b",
-                annotation_text="Thermal Alert (55°C)",
-            )
-            fig_temp.update_layout(
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(15,23,42,0.6)",
-                font=dict(color="#94a3b8", family="Inter"),
-                margin=dict(l=20, r=20, t=25, b=25),
-                height=320,
-                xaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)"),
-                yaxis=dict(title="Temperature (°C)", showgrid=True, gridcolor="rgba(255,255,255,0.05)"),
-            )
-            st.plotly_chart(fig_temp, use_container_width=True)
-
+            st.warning("No anomaly records found. Run calibration first, then collect telemetry.")
     else:
-        with chart_tab1:
-            st.info("Awaiting telemetry stream from ESP32 machine node via MQTT.")
-        with chart_tab2:
-            st.info("Awaiting current & voltage readings from INA219.")
-        with chart_tab3:
-            st.info("Awaiting temperature readings from DS18B20.")
+        if anomalies:
+            latest = anomalies[0]
+            score = latest.get("anomaly_score", 0.0)
+            threshold = latest.get("threshold", 0.0)
+            is_anom = bool(latest.get("is_anomaly", False))
+            st.caption(f"Latest anomaly: score={score:.3f}, threshold={threshold:.3f}, anomaly={'YES' if is_anom else 'no'}")
+        else:
+            st.caption("No anomaly data yet. Collect 20+ telemetry samples then run calibration.")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Test 5: Camera / Stream Health
+# ══════════════════════════════════════════════════════════════════════════════
+with test_cols[0]:
+    st.markdown("### Camera — Stream Health Check")
+    st.caption("Verify the MJPEG edge vision stream is reachable.")
+
+    if st.button(
+        "Check Stream Health",
+        key="btn_camera_test",
+        type="secondary",
+        use_container_width=True,
+        disabled=not backend_online,
+    ):
+        stream_url = f"{API_BASE_URL}/video/stream"
+        try:
+            r = requests.get(stream_url, timeout=3.0, stream=True)
+            if r.status_code == 200:
+                st.success("✅ Camera stream reachable (MJPEG)")
+                st.session_state.test_results["camera"] = {"status": "online", "code": 200}
+            else:
+                st.error(f"❌ Camera stream returned HTTP {r.status_code}")
+                st.session_state.test_results["camera"] = {"status": "error", "code": r.status_code}
+        except Exception as e:
+            st.error(f"❌ Camera stream unreachable: {e}")
+            st.session_state.test_results["camera"] = {"status": "offline", "error": str(e)}
+
+    if "camera" in st.session_state.test_results:
+        cr = st.session_state.test_results["camera"]
+        if cr.get("status") == "online":
+            st.success(f"Camera: ONLINE (HTTP {cr.get('code')})")
+        else:
+            st.error(f"Camera: {cr.get('status').upper()} — {cr.get('error', cr.get('code', 'unknown'))}")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Test Summary
+# ══════════════════════════════════════════════════════════════════════════════
+if st.session_state.test_results:
+    st.markdown("### Test Summary")
+    summary_rows = []
+    for test_name, result in st.session_state.test_results.items():
+        if test_name == "vision":
+            compliant = result.get("compliant")
+            status = "PASS" if compliant is True else ("FAIL" if compliant is False else "UNAVAILABLE")
+            summary_rows.append({"Test": "Vision / Helmet", "Status": status, "Detail": f"ratio={result.get('compliance_ratio', 0):.1%}"})
+        elif test_name == "motor":
+            summary_rows.append({"Test": "Motor / Interlock", "Status": result.get("command", "?"), "Detail": result.get("status", "")})
+        elif test_name == "proximity":
+            summary_rows.append({"Test": "Proximity Breach", "Status": "TRIGGERED", "Detail": f"{result.get('worker_id')} / {result.get('badge_mac')}"})
+        elif test_name == "vibration":
+            if result:
+                is_anom = bool(result.get("is_anomaly", False))
+                summary_rows.append({"Test": "Vibration Anomaly", "Status": "ANOMALY" if is_anom else "NOMINAL", "Detail": f"score={result.get('anomaly_score', 0):.3f}"})
+            else:
+                summary_rows.append({"Test": "Vibration Anomaly", "Status": "NO DATA", "Detail": ""})
+        elif test_name == "camera":
+            summary_rows.append({"Test": "Camera Stream", "Status": result.get("status", "UNKNOWN").upper(), "Detail": str(result.get("code", ""))})
+    if summary_rows:
+        st.dataframe(summary_rows, use_container_width=True, hide_index=True)
+
+st.markdown("<br>", unsafe_allow_html=True)
+# ══════════════════════════════════════════════════════════════════════════════
+# CALIBRATION & PREDICTIVE MAINTENANCE (MachinoCare 1.0 ML)
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown(
+    f"""
+    <div class="armor-header">
+        {icon_svg('calibration', color='#06b6d4', size=22)}
+        <span>Vibration Calibration & ML Model</span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+st.caption("Train the IsolationForest-distilled anomaly model on real ADXL345 telemetry. No synthetic data.")
+
+cal_left, cal_right = st.columns(2)
+
+with cal_left:
+    st.markdown("#### Model Status")
+    if model_package:
+        st.success("\u2714\ufe0f Calibrated model exists")
+        # model_package is a db row dict: model_package column holds JSON string
+        pkg_raw = model_package.get("model_package") if isinstance(model_package, dict) else None
+        try:
+            import json as _json
+            pkg = _json.loads(pkg_raw) if pkg_raw else {}
+        except Exception:
+            pkg = {}
+        st.caption(f"Windows: {model_package.get('window_count', 'N/A') if isinstance(model_package, dict) else 'N/A'}")
+        st.caption(f"Quality: {model_package.get('quality', 'N/A') if isinstance(model_package, dict) else 'N/A'}")
+        baseline_raw = model_package.get("baseline_stats") if isinstance(model_package, dict) else None
+        try:
+            baseline = _json.loads(baseline_raw) if baseline_raw else {}
+        except Exception:
+            baseline = {}
+        if baseline:
+            st.caption(f"Mean acc: {baseline.get('mean_acc', 0):.4f} g")
+            st.caption(f"Std acc: {baseline.get('std_acc', 0):.4f} g")
+            st.caption(f"Samples: {baseline.get('sample_count', 0)}")
+        thresholds = pkg.get("thresholds", {}) if isinstance(pkg, dict) else {}
+        if thresholds:
+            st.caption(f"Decision threshold: {thresholds.get('decision_threshold', 'N/A')}")
+            st.caption(f"Hysteresis high: {thresholds.get('hysteresis_high', 'N/A')}")
+            st.caption(f"Hysteresis low: {thresholds.get('hysteresis_low', 'N/A')}")
+    else:
+        st.warning("\u26a0\ufe0f No calibrated model yet")
+        st.caption("Collect 20+ telemetry samples, then run calibration below.")
 
 
-# ── Full-Width Section: Safety Incident Audit Log & Snapshot Evidence Inspector ───
+    st.markdown("#### Run Calibration")
+    contam = st.slider(
+        "Contamination (expected anomaly ratio)",
+        min_value=0.01,
+        max_value=0.40,
+        value=0.05,
+        step=0.01,
+        help="Proportion of samples expected to be anomalies. 0.05 = 5%.",
+    )
+    calib_disabled = not backend_online
+    if st.button(
+        "Run Calibration",
+        key="btn_calibrate",
+        type="primary",
+        use_container_width=True,
+        disabled=calib_disabled,
+    ):
+        with st.spinner("Training IsolationForest-distilled model..."):
+            code, resp = api_post(
+                "/api/v1/calibrate",
+                params={"device_id": device_id, "contamination": contam},
+                timeout=30.0,
+            )
+            if code == 200:
+                st.toast("Calibration complete!", icon=":material/check_circle:")
+                st.session_state.test_results["calibration"] = resp
+                st.rerun()
+            else:
+                st.error(f"Calibration failed: {resp.get('detail', resp)}")
+
+    if "calibration" in st.session_state.test_results:
+        cresp = st.session_state.test_results["calibration"]
+        st.success(f"Calibration done — {cresp.get('window_count', 0)} windows, quality={cresp.get('quality', 'N/A')}")
+
+with cal_right:
+    st.markdown("#### Sample Availability")
+    st.caption(f"Telemetry samples collected: **{len(samples)}** (need ≥20 for calibration)")
+    st.caption(f"Anomaly records: **{len(anomalies)}**")
+
+    if len(samples) >= 20:
+        st.success("✅ Sufficient samples for calibration")
+    else:
+        st.error(f"❌ Need {20 - len(samples)} more samples for calibration")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    st.markdown("#### Recent Anomalies")
+    if anomalies:
+        an_rows = []
+        for a in anomalies[:10]:
+            an_rows.append({
+                "Score": f"{float(a.get('anomaly_score', 0) or 0):.3f}",
+                "Threshold": f"{float(a.get('threshold', 0) or 0):.3f}",
+                "Anomaly": "YES" if bool(a.get("is_anomaly")) else "no",
+                "Time": str(a.get("recorded_at", ""))[:19],
+            })
+        st.dataframe(an_rows, use_container_width=True, hide_index=True)
+    else:
+        st.info("No anomaly records yet. Run calibration first.")
+
+st.markdown("<br>", unsafe_allow_html=True)
+# ══════════════════════════════════════════════════════════════════════════════
+# SAFETY INCIDENT AUDIT LOG & SNAPSHOT EVIDENCE INSPECTOR
+# ══════════════════════════════════════════════════════════════════════════════
 st.markdown("<br>", unsafe_allow_html=True)
 st.markdown(
     f"""
@@ -1138,6 +1537,7 @@ if incidents:
             "Select Incident to Inspect:",
             options=[row["Full ID"] for row in table_rows],
             format_func=lambda fid: f"Incident {fid[:8]}... - {next((r['Worker ID'] for r in table_rows if r['Full ID']==fid), '')}",
+            key="incident_select",
         )
 
         selected_incident = next((i for i in incidents if i["incident_id"] == selected_id), None)
@@ -1151,14 +1551,15 @@ if incidents:
                 st.caption(f"Compliance Ratio: **{float(selected_incident.get('compliance_ratio') or 0):.1%}** (Req: >=65%)")
                 st.caption(f"Status: **{'Resolved' if selected_incident.get('resolved') else 'ACTIVE LOCKOUT'}**")
 
-            if snap_path and os.path.exists(snap_path):
-                st.image(snap_path, caption=f"Evidence: {os.path.basename(snap_path)}", use_container_width=True)
+            if snap_path and Path(snap_path).exists():
+                st.image(snap_path, caption=f"Evidence: {Path(snap_path).name}", use_container_width=True)
             else:
                 st.warning(f"Snapshot file `{snap_path}` not found on disk.")
 
             if not selected_incident.get("resolved"):
                 if st.button(
                     f"Authorize Safety Reset for Incident {selected_id[:8]}",
+                    key="btn_reset_incident",
                     icon=":material/lock_open:",
                     use_container_width=True,
                     disabled=not backend_online,
@@ -1169,9 +1570,45 @@ if incidents:
                     )
                     if code == 200:
                         st.success(f"Incident {selected_id[:8]} marked resolved. Interlock cleared!")
-                        time.sleep(0.4)
                         st.rerun()
                     else:
                         st.error(f"Failed to reset: {resp}")
 else:
-    st.info("No safety violations recorded in SQLite yet. Trigger a breach or run `python test_backend.py` to populate test incidents.")
+    st.info("No safety violations recorded in SQLite yet. Trigger a breach or run the test suite to populate incidents.")
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WEBSOCKET LIVE FEED & MQTT DEBUG
+# ══════════════════════════════════════════════════════════════════════════════
+with st.expander("🔧 Debug: WebSocket Live Feed & MQTT Debug", expanded=False):
+    dbg_left, dbg_right = st.columns(2)
+
+    with dbg_left:
+        st.markdown("#### WebSocket Live Feed")
+        st.caption("Connect to `/ws/live` for instant push notifications.")
+        ws_status = "Connected" if backend_online else "Disconnected"
+        st.caption(f"Status: **{ws_status}**")
+        st.caption(f"URL: `ws://127.0.0.1:8000/ws/live?device_id={device_id}`")
+
+    with dbg_right:
+        st.markdown("#### MQTT Debug (Recent Messages)")
+        if backend_online:
+            mqtt_debug = api_get("/api/v1/debug/mqtt", params={"limit": 10}, timeout=1.0)
+            if mqtt_debug and "messages" in mqtt_debug:
+                for msg in mqtt_debug["messages"][:5]:
+                    topic = msg.get("topic", "unknown")
+                    payload = str(msg.get("payload", ""))[:120]
+                    st.code(f"{topic}\n{payload}", language="json")
+            else:
+                st.info("No recent MQTT messages.")
+        else:
+            st.caption("Backend must be online to view MQTT debug.")
+
+st.markdown("<br>", unsafe_allow_html=True)
+st.markdown(
+    "<div style='text-align:center; color:#64748b; font-size:0.8rem; margin-top:20px;'>"
+    "ARMOR Operator Control Room — Real ESP32 telemetry only. No simulation."
+    "</div>",
+    unsafe_allow_html=True,
+)
