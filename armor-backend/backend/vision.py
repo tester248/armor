@@ -13,9 +13,10 @@ Per ARMOR spec (ARMOR_System_Architecture_and_Implementation_Plan.md):
   • Frames served via generate_frames() → FastAPI StreamingResponse (MJPEG)
   • Streamlit embeds the stream via <iframe>
 
-Swap instruction for SW1:
-  Set YOLO_MODEL_PATH=<path_to_yolov8_seg.pt> in .env
-  The engine will auto-load the real model; stub is bypassed automatically.
+Configuration:
+  Set ROBOFLOW_API_KEY (and optionally ROBOFLOW_WORKSPACE /
+  ROBOFLOW_WORKFLOW_ID) in .env. The engine auto-loads the workflow;
+  otherwise it falls back to the built-in stub.
 """
 from __future__ import annotations
 
@@ -25,6 +26,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Generator
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 import cv2
 import numpy as np
@@ -39,7 +44,6 @@ except ValueError:
 HELMET_COMPLIANCE_THRESHOLD = float(
     os.getenv("HELMET_COMPLIANCE_THRESHOLD", "0.65")
 )
-YOLO_MODEL_PATH = os.getenv("YOLO_MODEL_PATH", "").strip()
 SNAPSHOT_DIR = Path(os.getenv("SNAPSHOT_DIR", "data/snapshots"))
 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -73,27 +77,6 @@ def _make_result(
         "snapshot_path": snapshot_path,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-
-
-# ── YOLO loader (optional real model) ─────────────────────────────────────────
-_yolo_model = None
-_yolo_lock = threading.Lock()
-
-
-def _try_load_yolo() -> bool:
-    """Try to load real YOLOv8-seg model. Returns True if successful."""
-    global _yolo_model
-    if not YOLO_MODEL_PATH:
-        return False
-    try:
-        from ultralytics import YOLO  # type: ignore
-        with _yolo_lock:
-            _yolo_model = YOLO(YOLO_MODEL_PATH)
-        print(f"[VisionEngine] YOLO model loaded from: {YOLO_MODEL_PATH}")
-        return True
-    except Exception as e:
-        print(f"[VisionEngine] Could not load YOLO model: {e}. Using stub.")
-        return False
 
 
 # �� Roboflow Workflow (RF-DETR + SAM 3) ��������������������������������������
@@ -199,6 +182,8 @@ def _roboflow_inspect(frame, worker_id):
         )
     except Exception as e:
         print(f"[VisionEngine] Roboflow workflow call failed: {e}")
+        if "401" in str(e) or "Unauthorized" in str(e):
+            print("[VisionEngine] Hint: use a Roboflow *secret* (private) API key, not a publishable one.")
         return _stub_inspect(frame, worker_id)
     finally:
         try:
@@ -330,73 +315,6 @@ def _stub_inspect(frame: np.ndarray, worker_id: str) -> tuple[bool, float, str, 
     return compliant, compliance_ratio, label, annotated
 
 
-# ── Real YOLO compliance check ─────────────────────────────────────────────────
-def _yolo_inspect(
-    frame: np.ndarray,
-    worker_id: str,
-) -> tuple[bool, float, str, np.ndarray]:
-    """
-    Real YOLOv8-seg inspection.
-    Extracts head ROI, runs segmentation, computes:
-        Compliance Ratio = Area(Helmet Mask ∩ Head ROI) / Area(Head ROI)
-    """
-    with _yolo_lock:
-        model = _yolo_model
-
-    if model is None:
-        return _stub_inspect(frame, worker_id)
-
-    h, w = frame.shape[:2]
-    annotated = frame.copy()
-
-    results = model(frame, verbose=False)
-    result = results[0] if results else None
-
-    if result is None or result.masks is None:
-        return _stub_inspect(frame, worker_id)
-
-    # Head ROI (top-centre heuristic — replace with pose detection if available)
-    roi_x1, roi_y1 = w // 4, int(h * 0.05)
-    roi_x2, roi_y2 = 3 * w // 4, int(h * 0.45)
-    roi_area = max(1, (roi_x2 - roi_x1) * (roi_y2 - roi_y1))
-
-    # Build binary ROI mask
-    roi_mask = np.zeros((h, w), dtype=np.uint8)
-    roi_mask[roi_y1:roi_y2, roi_x1:roi_x2] = 255
-
-    # Accumulate helmet-class pixels across all detections
-    helmet_mask = np.zeros((h, w), dtype=np.uint8)
-    for i, cls_id in enumerate(result.boxes.cls.cpu().numpy()):
-        name = model.names[int(cls_id)].lower()
-        if "helmet" in name or "head" in name:
-            seg_mask = result.masks.data[i].cpu().numpy()
-            seg_mask_resized = cv2.resize(
-                seg_mask, (w, h), interpolation=cv2.INTER_NEAREST
-            ).astype(np.uint8)
-            helmet_mask = cv2.bitwise_or(helmet_mask, seg_mask_resized)
-
-    # Intersection
-    intersection = cv2.bitwise_and(helmet_mask, roi_mask)
-    compliance_ratio = float(np.sum(intersection > 0)) / roi_area
-    compliant = compliance_ratio >= HELMET_COMPLIANCE_THRESHOLD
-    label = "HELMET_PASS" if compliant else "HELMET_FAIL"
-    colour = (0, 200, 80) if compliant else (0, 60, 220)
-
-    # Overlay
-    overlay = annotated.copy()
-    overlay[helmet_mask > 0] = colour
-    cv2.addWeighted(overlay, 0.4, annotated, 0.6, 0, annotated)
-    cv2.rectangle(annotated, (roi_x1, roi_y1), (roi_x2, roi_y2), (200, 200, 0), 2)
-    cv2.putText(
-        annotated,
-        f"{label}  ratio={compliance_ratio:.2f}",
-        (roi_x1, roi_y1 - 10),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 2,
-    )
-
-    return compliant, compliance_ratio, label, annotated
-
-
 # ── Vision Engine ──────────────────────────────────────────────────────────────
 class VisionEngine:
     """
@@ -414,7 +332,6 @@ class VisionEngine:
         self._running = False
         self._thread: threading.Thread | None = None
         self._roboflow_loaded = _try_load_roboflow()
-        self._yolo_loaded = _try_load_yolo()
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
     def start(self) -> None:
@@ -494,8 +411,6 @@ class VisionEngine:
 
         if self._roboflow_loaded:
             compliant, ratio, label, annotated = _roboflow_inspect(frame, worker_id)
-        elif self._yolo_loaded:
-            compliant, ratio, label, annotated = _yolo_inspect(frame, worker_id)
         else:
             compliant, ratio, label, annotated = _stub_inspect(frame, worker_id)
 

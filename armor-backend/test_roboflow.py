@@ -82,12 +82,21 @@ def main() -> None:
     with V._roboflow_lock:
         client = V._roboflow_client
 
-    result = client.run_workflow(
-        workspace_name=ROBOFLOW_WORKSPACE,
-        workflow_id=ROBOFLOW_WORKFLOW_ID,
-        images={"image": image_path},
-        use_cache=True,
-    )
+    try:
+        result = client.run_workflow(
+            workspace_name=ROBOFLOW_WORKSPACE,
+            workflow_id=ROBOFLOW_WORKFLOW_ID,
+            images={"image": image_path},
+            use_cache=True,
+        )
+    except Exception as e:
+        print("WORKFLOW CALL FAILED:")
+        print(e)
+        print()
+        print("Hint: 401 'not authorized for serverless inference' means the key is a")
+        print("publishable key. Use your Roboflow *secret* (private) API key from")
+        print("Account Settings -> API Keys (the one NOT safe to expose in browsers).")
+        sys.exit(1)
 
     print("RAW RESULT:")
     print(json.dumps(result, indent=2, default=str)[:8000])
