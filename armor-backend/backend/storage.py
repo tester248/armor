@@ -615,6 +615,26 @@ class ArmorStore:
             )
             self._conn.commit()
 
+    def delete_model_packages(
+        self,
+        machine_id: str,
+        device_id: str | None = None,
+    ) -> int:
+        """Purge stored model packages / calibrations (e.g. to get rid of models trained on off motor)."""
+        with self._lock:
+            if device_id:
+                cur = self._conn.execute(
+                    "DELETE FROM calibrations WHERE machine_id = ? AND device_id = ?",
+                    (machine_id, device_id),
+                )
+            else:
+                cur = self._conn.execute(
+                    "DELETE FROM calibrations WHERE machine_id = ?",
+                    (machine_id,),
+                )
+            self._conn.commit()
+            return cur.rowcount
+
     # ------------------------------------------------------------------ #
     # Anomaly Log
     # ------------------------------------------------------------------ #

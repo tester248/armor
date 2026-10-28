@@ -351,26 +351,41 @@ def latest_feature_vector(
     return extract_feature_vector(subset)
 
 
-def compute_multimodal_baseline_stats(samples: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Compute baseline nominal operating statistics across all 4 sensor modalities."""
-    if not samples:
-        return {
-            "mean_acc": 0.0,
-            "std_acc": 0.0,
-            "mean_crest": 1.41,
-            "std_crest": 0.2,
-            "mean_current": 0.0,
-            "std_current": 0.0,
-            "mean_voltage": 12.0,
-            "std_voltage": 0.0,
-            "mean_power": 0.0,
-            "std_power": 0.0,
-            "mean_temp": 30.0,
-            "std_temp": 0.0,
-            "sample_count": 0,
-            "modalities": ["vibration", "current", "voltage", "temperature"],
-        }
+DEFAULT_RUNNING_BASELINE: dict[str, Any] = {
+    "mean_acc": 0.036,
+    "std_acc": 0.015,
+    "mean_crest": 1.45,
+    "std_crest": 0.25,
+    "mean_current": 175.0,
+    "std_current": 25.0,
+    "mean_voltage": 12.0,
+    "std_voltage": 0.2,
+    "mean_power": 2100.0,
+    "std_power": 350.0,
+    "mean_temp": 30.1,
+    "std_temp": 1.5,
+    "sample_count": 100,
+    "modalities": ["vibration", "current", "voltage", "temperature"],
+}
 
+
+def compute_multimodal_baseline_stats(samples: Sequence[Mapping[str, Any]]) -> dict:
+    """Compute baseline nominal operating statistics across all 4 sensor modalities.
+    Filters for active running motor samples (current >= 50 mA) so baseline is NEVER learned from an off motor.
+    """
+    if not samples:
+        return dict(DEFAULT_RUNNING_BASELINE)
+
+    # Strictly filter for active running motor telemetry
+    running = [
+        s for s in samples
+        if float(s.get("current_ma", 0.0) or 0.0) >= 50.0 or float(s.get("rms", s.get("acc_mag", 0.0)) or 0.0) >= 0.02
+    ]
+    if len(running) < 8:
+        # Not enough active running samples to establish empirical baseline; fall back to factory running baseline
+        return dict(DEFAULT_RUNNING_BASELINE)
+
+    samples = running
     acc = np.array([float(s.get("acc_mag", s.get("rms", 0.0)) or 0.0) for s in samples], dtype=float)
     crest = np.array([float(s.get("crest_factor", 1.41) or 1.41) for s in samples], dtype=float)
     curr = np.array([float(s.get("current_ma", 0.0) or 0.0) for s in samples], dtype=float)
@@ -380,17 +395,17 @@ def compute_multimodal_baseline_stats(samples: Sequence[Mapping[str, Any]]) -> d
 
     return {
         "mean_acc": round(float(np.mean(acc)), 4),
-        "std_acc": round(float(np.std(acc)), 4),
+        "std_acc": max(round(float(np.std(acc)), 4), 0.015),
         "mean_crest": round(float(np.mean(crest)), 2),
-        "std_crest": round(float(np.std(crest)), 2),
+        "std_crest": max(round(float(np.std(crest)), 2), 0.2),
         "mean_current": round(float(np.mean(curr)), 2),
-        "std_current": round(float(np.std(curr)), 2),
+        "std_current": max(round(float(np.std(curr)), 2), 20.0),
         "mean_voltage": round(float(np.mean(volt)), 2),
-        "std_voltage": round(float(np.std(volt)), 2),
+        "std_voltage": max(round(float(np.std(volt)), 2), 0.1),
         "mean_power": round(float(np.mean(pwr)), 2),
-        "std_power": round(float(np.std(pwr)), 2),
+        "std_power": max(round(float(np.std(pwr)), 2), 300.0),
         "mean_temp": round(float(np.mean(temp)), 2),
-        "std_temp": round(float(np.std(temp)), 2),
+        "std_temp": max(round(float(np.std(temp)), 2), 1.0),
         "sample_count": len(samples),
         "modalities": ["vibration", "current", "voltage", "temperature"],
     }
@@ -433,15 +448,15 @@ def decompose_anomaly(
     stds = np.where(stds < 1e-6, 1.0, stds)
     threshold = float(package.get("hysteresis_high", package.get("decision_threshold", 0.0)))
 
-    # Parse baseline_stats if stored in package
-    baseline = package.get("baseline_stats")
+    # Parse baseline_stats if stored in package, or use DEFAULT_RUNNING_BASELINE
+    baseline = package.get("baseline_stats") if package else None
     if isinstance(baseline, str):
         try:
             baseline = json.loads(baseline)
         except Exception:
             baseline = {}
-    if not isinstance(baseline, dict):
-        baseline = {}
+    if not isinstance(baseline, dict) or not baseline.get("mean_current"):
+        baseline = DEFAULT_RUNNING_BASELINE
 
     import math
 
@@ -478,7 +493,9 @@ def decompose_anomaly(
 
     # 3. Voltage & Power (INA219)
     volt_cur = float(latest_sample.get("voltage_v", fv[7] if len(fv) > 7 else 12.0)) if latest_sample else float(fv[7] if len(fv) > 7 else 12.0)
-    z_volt = (10.5 - volt_cur) / 0.5 if volt_cur < 10.5 else ((volt_cur - 13.8) / 0.5 if volt_cur > 13.8 else 0.0)
+    z_volt = (10.5 - volt_cur) / 0.3 if volt_cur < 10.5 else ((volt_cur - 13.8) / 0.3 if volt_cur > 13.8 else 0.0)
+    if volt_cur <= 10.0 or volt_cur >= 14.2:
+        z_volt = max(z_volt, 3.2 + abs(10.0 - volt_cur))
 
     pwr_cur = float(latest_sample.get("power_mw", fv[9] if len(fv) > 9 else (volt_cur * curr_cur))) if latest_sample else float(fv[9] if len(fv) > 9 else 0.0)
     pwr_mean = float(baseline.get("mean_power", means[9] if len(means) > 9 else (12.0 * curr_mean)))

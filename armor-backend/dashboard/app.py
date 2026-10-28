@@ -436,6 +436,14 @@ def api_post(endpoint: str, json_data: dict | None = None, params: dict | None =
         return 500, {"error": str(e)}
 
 
+def api_delete(endpoint: str, params: dict | None = None, timeout: float = 2.0):
+    try:
+        r = requests.delete(f"{API_BASE_URL}{endpoint}", params=params, timeout=timeout)
+        return r.status_code, r.json() if r.content else {}
+    except Exception as e:
+        return 500, {"error": str(e)}
+
+
 # ── Step 1: Fast Single Health Check ──────────────────────────────────────
 health = api_get("/api/v1/health", timeout=1.0)
 backend_online = health is not None and health.get("status") == "ok"
@@ -1092,8 +1100,8 @@ else:
             f"""
             <div class="hud-card">
                 <div class="hud-title">Model Envelope</div>
-                <div class="hud-value hud-tiny">Multi-Modal IForest</div>
-                <div class="hud-sub">12 Features &middot; 4 Sensors (ADXL, INA, DS18)</div>
+                <div class="hud-value hud-tiny">Running Motor Baseline</div>
+                <div class="hud-sub">RS-555 DC Motor &middot; 4 Sensors (ADXL, INA, DS18)</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -1934,31 +1942,55 @@ with cal_left:
         help="Proportion of samples expected to be anomalies. 0.05 = 5%.",
     )
     calib_disabled = not backend_online
-    if st.button(
-        "Run Calibration",
-        key="btn_calibrate",
-        type="primary",
-        use_container_width=True,
-        disabled=calib_disabled,
-    ):
-        with st.spinner("Training IsolationForest-distilled model..."):
-            code, resp = api_post(
+    st.info("💡 Ensure the motor is **RUNNING** before calibrating, so nominal operating baseline is learned.")
+    col_cal_run, col_cal_reset = st.columns([1, 1])
+    with col_cal_run:
+        if st.button(
+            "Calibrate Running Baseline",
+            key="btn_calibrate",
+            type="primary",
+            use_container_width=True,
+            disabled=calib_disabled,
+        ):
+            with st.spinner("Calibrating running baseline across sensors..."):
+                code, resp = api_post(
+                    "/api/v1/calibrate",
+                    params={"device_id": device_id, "contamination": contam},
+                    timeout=30.0,
+                )
+                if code == 200:
+                    st.toast("Running baseline calibrated!", icon=":material/check_circle:")
+                    st.session_state.test_results["calibration"] = resp
+                    api_get(f"/api/v1/telemetry/anomaly/decomposition/{device_id}", timeout=2.0)
+                    st.rerun()
+                else:
+                    st.error(f"Calibration rejected: {resp.get('detail', resp)}")
+
+    with col_cal_reset:
+        if st.button(
+            "Purge / Reset Model",
+            key="btn_reset_model",
+            type="secondary",
+            use_container_width=True,
+            disabled=calib_disabled,
+            help="Purge old models trained on off motor and restore factory running baseline.",
+        ):
+            code, resp = api_delete(
                 "/api/v1/calibrate",
-                params={"device_id": device_id, "contamination": contam},
-                timeout=30.0,
+                params={"device_id": device_id},
+                timeout=10.0,
             )
             if code == 200:
-                st.toast("Calibration complete!", icon=":material/check_circle:")
-                st.session_state.test_results["calibration"] = resp
-                # Trigger immediate re-scoring with new package
+                st.toast("Purged old models! Restored factory running baseline.", icon=":material/delete_forever:")
+                st.session_state.test_results.pop("calibration", None)
                 api_get(f"/api/v1/telemetry/anomaly/decomposition/{device_id}", timeout=2.0)
                 st.rerun()
             else:
-                st.error(f"Calibration failed: {resp.get('detail', resp)}")
+                st.error(f"Reset failed: {resp.get('detail', resp)}")
 
     if "calibration" in st.session_state.test_results:
         cresp = st.session_state.test_results["calibration"]
-        st.success(f"Calibration done — {cresp.get('window_count', 0)} windows across Vibration, Current, Voltage & Temperature (Model: {cresp.get('model_type', 'IsolationForest')})")
+        st.success(f"Running baseline active — {cresp.get('window_count', 0)} active samples across Vibration, Current, Voltage & Temperature.")
 
 with cal_right:
     st.markdown("#### Sample Availability")

@@ -278,27 +278,14 @@ def _score_anomaly(device_id: str) -> dict[str, Any] | None:
         if not recent:
             return None
 
-        # Auto-initialize calibration package if missing or feature dimension mismatched
-        if package is None or len(package.get("feature_means", [])) != len(FEATURE_ORDER):
-            if len(recent) >= 20:
-                print(f"[ML] Auto-calibrating 12-feature baseline for {device_id}...")
-                f_mat = build_feature_matrix(recent, window_size=10)
-                model_path = Path(ARMOR_DB).parent / "models" / f"{device_id}.joblib"
-                package = train_isolation_forest(f_mat, contamination=0.05, model_path=model_path)
-                baseline = compute_multimodal_baseline_stats(recent)
-                store.save_model_package("machino_node_01", device_id, package, baseline, None, package.get("window_count"))
-
         fv = latest_feature_vector(recent, window_size=10)
         if fv is None:
             fv = extract_feature_vector([recent[-1]])
 
-        raw_score = None
-        if package:
-            raw_score = _score_package(fv, package)
-
-        # 1. Full multi-modal decomposition with instantaneous single-parameter spike detection
+        # 1. Full multi-modal decomposition evaluated directly against running motor baseline
+        # No brittle black-box model trained on an off motor; instantaneous per-parameter spike detection!
         latest_sample = recent[-1] if recent else None
-        decomp = decompose_anomaly(fv, package or {}, latest_sample=latest_sample, raw_score=raw_score)
+        decomp = decompose_anomaly(fv, package or {}, latest_sample=latest_sample, raw_score=None)
         _latest_decomp[device_id] = decomp
 
         # 2. 5-Second Sliding Window Persistence Tracker
@@ -1166,48 +1153,61 @@ def deactivate_worker(badge_mac: str):
 # ============================================================================
 @app.post("/api/v1/calibrate", tags=["Calibration"])
 def calibrate(device_id: str = Query(default="machino_node_01"), contamination: float = Query(default=0.05, ge=0.01, le=0.4)):
-    """Train the server-side IsolationForest on recent telemetry samples.
-
-    Scoring runs on this PC, so the forest is kept intact rather than distilled
-    into a linear surrogate for the ESP32.
-    """
+    """Calibrate the multi-modal physical baseline on active running telemetry."""
+    from backend.ml_engine import DEFAULT_RUNNING_BASELINE
     samples = store.get_recent_samples_for_ml(device_id, limit=500)
-    if len(samples) < 20:
-        raise HTTPException(status_code=400, detail="Need at least 20 telemetry samples for calibration.")
+    running_samples = [s for s in samples if float(s.get("current_ma", 0.0) or 0.0) >= 50.0]
+    if len(running_samples) < 8:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot calibrate on an OFF motor! Current is < 50 mA. Please start the RS-555 motor so nominal running baseline can be learned."
+        )
 
-    import numpy as np
-    feature_matrix = build_feature_matrix(samples, window_size=25)
-    if feature_matrix.shape[0] < 8:
-        raise HTTPException(status_code=400, detail="Not enough windows for calibration.")
-
-    model_path = Path(ARMOR_DB).parent / "models" / f"{device_id}.joblib"
-    package = train_isolation_forest(
-        feature_matrix,
-        contamination=contamination,
-        model_path=model_path,
-    )
-
-    baseline = compute_multimodal_baseline_stats(samples)
+    baseline = compute_multimodal_baseline_stats(running_samples)
+    package = {
+        "model_type": "RunningMotorBaseline",
+        "baseline_stats": baseline,
+        "window_count": len(running_samples),
+        "modalities": ["vibration", "current", "voltage", "power", "temperature"],
+    }
 
     store.save_model_package(
         machine_id="machino_node_01",
         device_id=device_id,
         package=package,
         baseline_stats=baseline,
-        quality=None,
-        window_count=package.get("window_count"),
+        quality=1.0,
+        window_count=len(running_samples),
     )
+    _latest_decomp.pop(device_id, None)
 
     return {
         "status": "completed",
         "device_id": device_id,
-        "model_type": package.get("model_type"),
-        "window_count": package.get("window_count"),
-        "train_score_p95": package.get("train_score_p95"),
-        "feature_order": package.get("feature_order"),
+        "model_type": "RunningMotorBaseline",
+        "window_count": len(running_samples),
         "baseline_stats": baseline,
-        "modalities": ["vibration", "current", "voltage", "temperature"],
-        "model_package": package,
+        "modalities": ["vibration", "current", "voltage", "power", "temperature"],
+    }
+
+
+@app.delete("/api/v1/calibrate", tags=["Calibration"])
+def reset_calibration(device_id: str = Query(default="machino_node_01")):
+    """Purge stored model/calibration and reset baseline to factory running defaults."""
+    from backend.ml_engine import DEFAULT_RUNNING_BASELINE
+    count = store.delete_model_packages("machino_node_01", device_id)
+    model_path = Path(ARMOR_DB).parent / "models" / f"{device_id}.joblib"
+    if model_path.exists():
+        try:
+            model_path.unlink()
+        except Exception:
+            pass
+    _latest_decomp.pop(device_id, None)
+    return {
+        "status": "reset",
+        "device_id": device_id,
+        "records_purged": count,
+        "active_baseline": DEFAULT_RUNNING_BASELINE,
     }
 
 
