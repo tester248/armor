@@ -97,10 +97,11 @@ volatile bool gEmaInit = false;
 // Last badge heard over ESP-NOW. The callback runs in the WiFi task, so the
 // shared fields are copied under a critical section.
 portMUX_TYPE gBadgeMux = portMUX_INITIALIZER_UNLOCKED;
-char    gBadgeId[32]  = "";
-uint8_t gBadgeMac[6]  = {0};
-float   gBadgeBattery = 0.0f;
-bool    gBadgeSeen    = false;
+char     gBadgeId[32]  = "";
+uint8_t  gBadgeMac[6]  = {0};
+float    gBadgeBattery = 0.0f;
+bool     gBadgeSeen    = false;
+volatile uint32_t gBadgeLastTime = 0;
 
 // Vibration RMS window: 100 samples at 100 Hz = 1 second, values in g.
 static const int VIB_WINDOW = 100;
@@ -292,6 +293,7 @@ void onEspNowRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len)
   memcpy(gBadgeMac, src, sizeof(gBadgeMac));
   gBadgeBattery = beacon.battery_voltage;
   gBadgeSeen = true;
+  gBadgeLastTime = millis();
   portEXIT_CRITICAL(&gBadgeMux);
 }
 
@@ -412,11 +414,21 @@ void core1Task(void* pv) {
     if (now - lastTelemetry >= 1000) {
       lastTelemetry = now;
 
-      Serial.printf("[TELEMETRY] Temp: %4.1f C | Bus: %5.2f V | Current: %5.1f mA | Vib: %4.2f | Motor: %-7s | Blynk: %-7s | MQTT: %-9s\r\n",
-                    gTempC, gVoltageV, gCurrentMa, gRms,
+      bool badgeActive = gBadgeSeen && (now - gBadgeLastTime < 2500);
+      float distEst = gEmaInit ? powf(10.0f, (RSSI_AT_1M - gEmaRssi) / (10.0f * PATH_LOSS_N)) : 99.0f;
+      char badgeStr[48];
+      if (badgeActive) {
+        snprintf(badgeStr, sizeof(badgeStr), "%s (%ddBm, ~%.1fm)", gBadgeId, (int)roundf(gEmaRssi), distEst);
+      } else {
+        snprintf(badgeStr, sizeof(badgeStr), "NOT SEEN");
+      }
+
+      Serial.printf("[TELEMETRY] Temp: %4.1f C | Bus: %5.2f V | Current: %5.1f mA | Motor: %-7s | Blynk: %-7s | MQTT: %-9s | Badge: %s\r\n",
+                    gTempC, gVoltageV, gCurrentMa,
                     motorRunning ? "RUNNING" : "STOPPED",
                     Blynk.connected() ? "ONLINE" : "OFFLINE",
-                    mqtt.connected() ? "CONNECTED" : "OFFLINE");
+                    mqtt.connected() ? "CONNECTED" : "OFFLINE",
+                    badgeStr);
 
       // Push Live Telemetry to Blynk Virtual Pins
       if (Blynk.connected()) {
