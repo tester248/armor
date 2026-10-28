@@ -673,9 +673,45 @@ class VisionEngine:
 
     # ── MJPEG stream ──────────────────────────────────────────────────────────
     def generate_frames(self) -> Generator[bytes, None, None]:
-        """Yields MJPEG bytes for FastAPI StreamingResponse."""
+        """Yields MJPEG bytes for FastAPI StreamingResponse.
+
+        Draws person-detection bounding boxes (green) when a person is in
+        frame. Boxes are cheap OpenCV rectangle calls — no extra inference —
+        so the stream stays near 20 fps.
+        """
         while True:
             frame = self._get_frame()
+
+            # Copy person state under lock (fast, no I/O).
+            with self._person_lock:
+                person_present = self._person_present
+                person_boxes = list(self._person_boxes)
+                vision_state = self._vision_state
+
+            # Draw bounding boxes only when a person is detected.
+            if person_present:
+                for x1, y1, x2, y2 in person_boxes:
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(
+                        frame,
+                        "PERSON",
+                        (x1, max(y1 - 10, 20)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (0, 255, 0),
+                        2,
+                    )
+                # State badge in top-right corner.
+                cv2.putText(
+                    frame,
+                    f"STATE: {vision_state}",
+                    (frame.shape[1] - 220, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 255, 255),
+                    2,
+                )
+
             _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
             yield (
                 b"--frame\r\n"
