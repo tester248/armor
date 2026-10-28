@@ -87,12 +87,13 @@ volatile bool benchTestMode       = true;  // Desk bench test mode: toggle via B
 volatile bool gInterlock          = false; // Safety lock (MQTT or proximity breach)
 volatile bool motorRunning        = false; // Physical motor output state
 
-// RSSI / EMA (ESP-NOW Wearable Badge Receiver)
+// RSSI / EMA (ESP-NOW Wearable Badge Receiver) - Demo Calibration (-50 dBm to -65 dBm)
 static const float EMA_ALPHA       = 0.35f;
-static const float RSSI_ENTER      = -65.0f;  // breach when smoothed RSSI is above this
-static const float RSSI_EXIT       = -70.0f;  // hysteresis: clear only below this
-static const float RSSI_AT_1M      = -45.0f;  // calibrate at the venue (RSSI at 1 metre)
-static const float PATH_LOSS_N     = 2.2f;    // indoor path-loss exponent
+static const float RSSI_ENTER      = -52.0f;  // Proximity breach: closer than ~1.2m (-50 to -52 dBm)
+static const float RSSI_EXIT       = -58.0f;  // Clear breach: stepped back beyond ~1.8m (-58 dBm)
+static const float RSSI_MAX_RANGE  = -65.0f;  // Outer demonstration boundary (-65 dBm)
+static const float RSSI_AT_1M      = -50.0f;  // Realistic indoor 1m baseline
+static const float PATH_LOSS_N     = 2.8f;    // Indoor cluttered environment path loss exponent
 volatile float gEmaRssi = 0.0f;
 volatile bool gEmaInit = false;
 
@@ -613,10 +614,14 @@ void core1Task(void* pv) {
       lastTelemetry = now;
 
       bool badgeActive = gBadgeSeen && (now - gBadgeLastTime < 2500);
-      float distEst = gEmaInit ? powf(10.0f, (RSSI_AT_1M - gEmaRssi) / (10.0f * PATH_LOSS_N)) : 99.0f;
-      char badgeStr[48];
+      float distEst = gEmaInit ? fminf(10.0f, powf(10.0f, (RSSI_AT_1M - gEmaRssi) / (10.0f * PATH_LOSS_N))) : 99.0f;
+      char badgeStr[64];
       if (badgeActive) {
-        snprintf(badgeStr, sizeof(badgeStr), "%s (%ddBm, ~%.1fm)", gBadgeId, (int)roundf(gEmaRssi), distEst);
+        if (gEmaRssi < RSSI_MAX_RANGE) {
+          snprintf(badgeStr, sizeof(badgeStr), "%s (OUT OF DEMO RANGE: %ddBm)", gBadgeId, (int)roundf(gEmaRssi));
+        } else {
+          snprintf(badgeStr, sizeof(badgeStr), "%s (%ddBm, ~%.1fm)", gBadgeId, (int)roundf(gEmaRssi), distEst);
+        }
       } else {
         snprintf(badgeStr, sizeof(badgeStr), "NOT SEEN");
       }
@@ -721,7 +726,7 @@ void core1Task(void* pv) {
           snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
-          float distance = powf(10.0f, (RSSI_AT_1M - gEmaRssi) / (10.0f * PATH_LOSS_N));
+          float distance = fminf(10.0f, powf(10.0f, (RSSI_AT_1M - gEmaRssi) / (10.0f * PATH_LOSS_N)));
 
           if (mqtt.connected()) {
             StaticJsonDocument<384> doc;
