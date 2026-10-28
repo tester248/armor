@@ -220,7 +220,7 @@ class ArmorStore:
                 """
                 SELECT * FROM telemetry
                 WHERE device_id = ?
-                ORDER BY ts DESC
+                ORDER BY id DESC
                 LIMIT ?
                 """,
                 (device_id, limit),

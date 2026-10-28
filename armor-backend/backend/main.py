@@ -62,7 +62,8 @@ from backend.models import (
 # ── Config ────────────────────────────────────────────────────────────────────
 MQTT_BROKER   = os.getenv("MQTT_BROKER", "localhost")
 MQTT_PORT     = int(os.getenv("MQTT_PORT", "1883"))
-ARMOR_DB      = os.getenv("ARMOR_DB", "data/armor.db")
+_ARMOR_DB_RAW = os.getenv("ARMOR_DB", "data/armor.db")
+ARMOR_DB = str((Path(__file__).resolve().parent.parent / _ARMOR_DB_RAW).resolve()) if not os.path.isabs(_ARMOR_DB_RAW) else _ARMOR_DB_RAW
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 LIVE_PUSH_INTERVAL = 0.75   # seconds between WebSocket snapshots
