@@ -276,12 +276,20 @@ class ArmorStore:
                 acc_mag = (float(ax) ** 2 + float(ay) ** 2 + float(az) ** 2) ** 0.5
             else:
                 acc_mag = float(row.get("rms") or 0.0)
+
+            volt = float(row.get("voltage_v") or 0.0)
+            curr = float(row.get("current_ma") or 0.0)
+            pwr = float(row.get("power_mw") or (round(volt * curr, 2) if (volt and curr) else 0.0))
+            temp = float(row.get("temperature_c") or 0.0)
+
             samples.append(
                 {
                     "acc_mag": acc_mag,
-                    "crest_factor": row.get("crest_factor") or 0.0,
-                    "temperature_c": row.get("temperature_c") or 0.0,
-                    "current_ma": row.get("current_ma") or 0.0,
+                    "crest_factor": float(row.get("crest_factor") or 0.0),
+                    "current_ma": curr,
+                    "voltage_v": volt,
+                    "power_mw": pwr,
+                    "temperature_c": temp,
                 }
             )
         return samples
