@@ -25,6 +25,7 @@
 #include <DallasTemperature.h>
 #include <Adafruit_INA219.h>
 #include <ArduinoJson.h>
+#include <HTTPClient.h>
 #include <time.h>
 
 // ---------- WiFi & MQTT Config ----------
@@ -112,6 +113,36 @@ float vMinY = 1e9f, vMaxY = -1e9f;
 float vMinZ = 1e9f, vMaxZ = -1e9f;
 int   vCount = 0;
 
+// ---------- Edge Anomaly Detection (distilled IsolationForest) ----------
+// Model config fetched from backend /api/v1/model/{device_id}
+const char* BACKEND_HOST   = "10.24.103.35";  // Laptop running ARMOR FastAPI backend
+const uint16_t BACKEND_PORT = 8000;
+static const int FEATURE_DIM = 8;
+static const int ANOMALY_WINDOW = 25;   // 25 samples @ 100 Hz = 0.25s feature window
+
+// Distilled model parameters (populated from backend calibration)
+float gModelFeatureMeans[FEATURE_DIM] = {0};
+float gModelFeatureStds[FEATURE_DIM]  = {1};
+float gModelWeights[FEATURE_DIM]      = {0};
+float gModelBias                      = 0.0f;
+float gModelThresholdHigh             = 0.0f;
+float gModelThresholdLow              = 0.0f;
+bool  gModelLoaded                    = false;
+
+// Circular buffer of recent acc_mag values for feature extraction
+float gAccMagWindow[ANOMALY_WINDOW] = {0};
+int   gAccMagIdx                    = 0;
+int   gAccMagCount                  = 0;
+
+// Anomaly state (set by Core 0, read by Core 1 for telemetry)
+volatile float gAnomalyScore        = 0.0f;
+volatile bool  gIsAnomaly           = false;
+volatile bool  gAnomalyModelReady   = false;
+
+// Last model fetch time (to avoid re-fetching every second)
+volatile uint32_t gLastModelFetch   = 0;
+static const uint32_t MODEL_FETCH_INTERVAL_MS = 30000;  // Re-fetch every 30 s
+
 // ---------- ADXL Helpers ----------
 void adxlWrite(uint8_t reg, uint8_t val) {
   SPI.beginTransaction(adxlSpi);
@@ -167,6 +198,137 @@ void readAxes(float &ax, float &ay, float &az) {
   ax = (int16_t)((x1 << 8) | x0) * scale;
   ay = (int16_t)((y1 << 8) | y0) * scale;
   az = (int16_t)((z1 << 8) | z0) * scale;
+}
+
+// ---------- Edge Anomaly Detection ----------
+
+// Fetch distilled model package from backend /api/v1/model/{device_id}
+// Returns true if model was successfully parsed and loaded.
+bool fetchModelFromBackend() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  char url[128];
+  snprintf(url, sizeof(url),
+           "http://%s:%d/api/v1/model/%s",
+           BACKEND_HOST, BACKEND_PORT, DEVICE_ID);
+
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(5000);
+
+  int httpCode = http.GET();
+  if (httpCode != HTTP_CODE_OK) {
+    Serial.printf("[ANOMALY] Model fetch HTTP %d\n", httpCode);
+    http.end();
+    return false;
+  }
+
+  DynamicJsonDocument doc(2048);
+  DeserializationError err = deserializeJson(doc, http.getString());
+  http.end();
+
+  if (err) {
+    Serial.printf("[ANOMALY] JSON parse failed: %s\n", err.c_str());
+    return false;
+  }
+
+  JsonObject model = doc["model_package"];
+  if (!model) {
+    Serial.println("[ANOMALY] No model_package in response");
+    return false;
+  }
+
+  JsonArray means  = model["feature_means"];
+  JsonArray stds   = model["feature_stds"];
+  JsonArray weights = model["weights"];
+
+  if (!means || !stds || !weights ||
+      means.size() < FEATURE_DIM || stds.size() < FEATURE_DIM || weights.size() < FEATURE_DIM) {
+    Serial.println("[ANOMALY] Model arrays too short");
+    return false;
+  }
+
+  for (int i = 0; i < FEATURE_DIM; i++) {
+    gModelFeatureMeans[i] = means[i] | 0.0f;
+    gModelFeatureStds[i]  = stds[i] | 1.0f;
+    gModelWeights[i]      = weights[i] | 0.0f;
+  }
+
+  gModelBias              = model["bias"] | 0.0f;
+  gModelThresholdHigh     = model["decision_threshold"] | 0.0f;
+  gModelThresholdLow      = model["hysteresis_low"] | model["decision_threshold"] | 0.0f;
+  gModelLoaded            = true;
+  gAnomalyModelReady      = true;
+
+  Serial.printf("[ANOMALY] Model loaded: threshold_high=%.4f threshold_low=%.4f\n",
+                gModelThresholdHigh, gModelThresholdLow);
+  return true;
+}
+
+// Compute anomaly score for one feature window using the distilled Ridge model.
+// Mirrors backend/ml_engine.py: score = dot(weights, z) + bias where z = (x - means) / stds.
+void computeAnomalyScore(float acc_mag, float &score, bool &is_anomaly) {
+  score = 0.0f;
+  is_anomaly = false;
+
+  if (!gModelLoaded) return;
+
+  // Add new sample to circular buffer
+  gAccMagWindow[gAccMagIdx] = acc_mag;
+  gAccMagIdx = (gAccMagIdx + 1) % ANOMALY_WINDOW;
+  if (gAccMagCount < ANOMALY_WINDOW) gAccMagCount++;
+
+  // Need a full window to compute meaningful features
+  if (gAccMagCount < ANOMALY_WINDOW) return;
+
+  // Build 8-element feature vector (mirrors backend ml_engine.py FEATURE_ORDER)
+  float features[FEATURE_DIM];
+
+  // 1. mean_acc_mag
+  float sum = 0.0f;
+  for (int i = 0; i < ANOMALY_WINDOW; i++) sum += gAccMagWindow[i];
+  features[0] = sum / ANOMALY_WINDOW;
+
+  // 2. std_acc_mag
+  float mean = features[0];
+  float var = 0.0f;
+  for (int i = 0; i < ANOMALY_WINDOW; i++) {
+    float d = gAccMagWindow[i] - mean;
+    var += d * d;
+  }
+  features[1] = sqrtf(var / ANOMALY_WINDOW);
+
+  // 3. max_acc_mag
+  features[2] = 0.0f;
+  for (int i = 0; i < ANOMALY_WINDOW; i++) {
+    if (gAccMagWindow[i] > features[2]) features[2] = gAccMagWindow[i];
+  }
+
+  // 4-8. ADXL345 is accel-only: gyro features are zero
+  features[3] = 0.0f;  // mean_gyro_mag
+  features[4] = 0.0f;  // std_gx
+  features[5] = 0.0f;  // std_gy
+  features[6] = 0.0f;  // std_gz
+  features[7] = 0.0f;  // axis_imbalance_ratio
+
+  // Normalize and compute score
+  for (int i = 0; i < FEATURE_DIM; i++) {
+    float std_i = gModelFeatureStds[i];
+    if (std_i < 1e-6f) std_i = 1.0f;
+    float z = (features[i] - gModelFeatureMeans[i]) / std_i;
+    score += gModelWeights[i] * z;
+  }
+  score += gModelBias;
+
+  // Hysteresis: only flip state if clearly above/below thresholds
+  if (score >= gModelThresholdHigh) {
+    is_anomaly = true;
+  } else if (score < gModelThresholdLow) {
+    is_anomaly = false;
+  } else {
+    // In hysteresis band: keep previous state
+    is_anomaly = gIsAnomaly;
+  }
 }
 
 // RMS of the dynamic acceleration over a 1-second window. Subtracting each
@@ -324,6 +486,10 @@ void core0Task(void* pv) {
     readAxes(ax, ay, az);
     accumulateVibration(ax, ay, az);
 
+    // --- Edge Anomaly Detection ---
+    float acc_mag = sqrtf(ax * ax + ay * ay + az * az);
+    computeAnomalyScore(acc_mag, gAnomalyScore, gIsAnomaly);
+
     gVoltageV  = ina219.getBusVoltage_V();
     gCurrentMa = ina219.getCurrent_mA();
 
@@ -371,6 +537,13 @@ void core1Task(void* pv) {
     configTime(0, 0, "pool.ntp.org", "time.nist.gov");
     Blynk.config(BLYNK_AUTH_TOKEN);
     Blynk.connect();
+
+    // Fetch distilled anomaly model from backend
+    if (fetchModelFromBackend()) {
+      Serial.println("[ANOMALY] Model fetched from backend");
+    } else {
+      Serial.println("[ANOMALY] Model fetch will retry on next cycle");
+    }
   } else {
     Serial.println("\r\n[WiFi] Connection timeout. Make sure phone hotspot is ON (and 'Maximize Compatibility' / 2.4 GHz is enabled). Continuing in offline mode...");
   }
@@ -401,6 +574,14 @@ void core1Task(void* pv) {
       ensureMqtt();
       mqtt.loop();
       Blynk.run();
+
+      // Periodically re-fetch anomaly model from backend
+      if (now - gLastModelFetch >= MODEL_FETCH_INTERVAL_MS) {
+        gLastModelFetch = now;
+        if (fetchModelFromBackend()) {
+          Serial.println("[ANOMALY] Model re-fetched from backend");
+        }
+      }
     } else {
       if (now - lastWiFiRetry >= 10000) {
         lastWiFiRetry = now;
@@ -436,11 +617,13 @@ void core1Task(void* pv) {
         Blynk.virtualWrite(V2, gCurrentMa);
         Blynk.virtualWrite(V3, gTempC);
         Blynk.virtualWrite(V4, gRms);
+        Blynk.virtualWrite(V5, gAnomalyScore);
+        Blynk.virtualWrite(V6, gIsAnomaly ? 1 : 0);
       }
 
       // Publish Telemetry to MQTT
       if (mqtt.connected()) {
-        StaticJsonDocument<320> doc;
+        StaticJsonDocument<512> doc;
         doc["device_id"]   = DEVICE_ID;
         time_t epochSec = time(nullptr);
         if (epochSec > 1700000000) {           // NTP synced
@@ -450,6 +633,10 @@ void core1Task(void* pv) {
         JsonObject vib = doc.createNestedObject("vibration");
         vib["rms"]          = gRms;
         vib["crest_factor"] = gCrestFactor;
+        JsonObject anom = doc.createNestedObject("anomaly");
+        anom["score"]    = gAnomalyScore;
+        anom["is_anomaly"] = gIsAnomaly;
+        anom["model_ready"] = gAnomalyModelReady;
         JsonObject pwr = doc.createNestedObject("power");
         pwr["voltage_v"] = gVoltageV;
         pwr["current_ma"]= gCurrentMa;
