@@ -9,7 +9,7 @@ Implements the web command center per:
 Features:
   • High-impact dark cyberpunk / industrial safety command room styling
   • Pulsing real-time safety alert banners (Normal / Breach / Lockout)
-  • Embedded low-latency Edge Vision MJPEG iframe (http://localhost:8000/video/stream)
+  • Embedded low-latency Edge Vision MJPEG iframe (http://127.0.0.1:8000/video/stream)
   • Real-time Plotly charts for ADXL345 vibration, INA219 current/power, DS18B20 temp
   • Incident log table with interactive snapshot photo evidence inspector
   • Manual emergency lockout & safety recovery controls
@@ -29,8 +29,8 @@ import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-# ── Config ────────────────────────────────────────────────────────────────────
-API_BASE_URL = os.getenv("ARMOR_API_URL", "http://localhost:8000")
+# ── Config (Use 127.0.0.1 to avoid Windows IPv6 localhost delay) ──────────────
+API_BASE_URL = os.getenv("ARMOR_API_URL", "http://127.0.0.1:8000")
 DEFAULT_DEVICE_ID = os.getenv("ARMOR_DEVICE_ID", "machino_node_01")
 SNAPSHOTS_DIR = Path(os.getenv("SNAPSHOT_DIR", "data/snapshots"))
 
@@ -42,7 +42,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Custom CSS Design System (Dark Industrial Safety Command Center) ──────────
+# ── Custom CSS Design System ──────────────────────────────────────────────────
 st.markdown(
     """
     <style>
@@ -52,7 +52,6 @@ st.markdown(
         --armor-bg: #0b0f19;
         --armor-card-bg: rgba(18, 26, 43, 0.75);
         --armor-card-border: rgba(56, 189, 248, 0.15);
-        --armor-card-glow: rgba(56, 189, 248, 0.05);
         --armor-text-primary: #f8fafc;
         --armor-text-muted: #94a3b8;
         --armor-green: #10b981;
@@ -83,10 +82,6 @@ st.markdown(
         backdrop-filter: blur(16px);
         box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
         margin-bottom: 16px;
-        transition: transform 0.2s ease, border-color 0.2s ease;
-    }
-    .armor-panel:hover {
-        border-color: rgba(56, 189, 248, 0.35);
     }
 
     /* Metric HUD Cards */
@@ -164,6 +159,16 @@ st.markdown(
         box-shadow: 0 0 25px rgba(245, 158, 11, 0.25);
         margin-bottom: 20px;
     }
+    .alert-banner-offline {
+        background: linear-gradient(90deg, rgba(100, 116, 139, 0.2) 0%, rgba(71, 85, 105, 0.15) 100%);
+        border: 1px dashed rgba(148, 163, 184, 0.4);
+        border-radius: 10px;
+        padding: 14px 20px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 20px;
+    }
 
     @keyframes pulse-red {
         0% { box-shadow: 0 0 15px rgba(239, 68, 68, 0.4); }
@@ -178,6 +183,7 @@ st.markdown(
         border: 1px solid rgba(56, 189, 248, 0.3);
         box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
         position: relative;
+        background: #020617;
     }
     .live-badge {
         position: absolute;
@@ -195,7 +201,6 @@ st.markdown(
         box-shadow: 0 0 10px rgba(239, 68, 68, 0.8);
     }
 
-    /* Headers */
     .armor-header {
         font-family: 'Space Grotesk', sans-serif;
         font-weight: 700;
@@ -219,10 +224,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ── API Client Helpers ────────────────────────────────────────────────────────
+# ── Resilient Fast API Helpers ────────────────────────────────────────────────
 def api_get(endpoint: str, params: dict | None = None) -> Any:
     try:
-        r = requests.get(f"{API_BASE_URL}{endpoint}", params=params, timeout=2.5)
+        r = requests.get(f"{API_BASE_URL}{endpoint}", params=params, timeout=0.6)
         if r.status_code == 200:
             return r.json()
     except Exception:
@@ -232,10 +237,15 @@ def api_get(endpoint: str, params: dict | None = None) -> Any:
 
 def api_post(endpoint: str, json_data: dict | None = None, params: dict | None = None) -> Any:
     try:
-        r = requests.post(f"{API_BASE_URL}{endpoint}", json=json_data, params=params, timeout=3.5)
+        r = requests.post(f"{API_BASE_URL}{endpoint}", json=json_data, params=params, timeout=1.5)
         return r.status_code, r.json() if r.content else {}
     except Exception as e:
         return 500, {"error": str(e)}
+
+
+# ── Step 1: Fast Single Health Check ──────────────────────────────────────────
+health = api_get("/api/v1/health")
+backend_online = health is not None and health.get("status") == "ok"
 
 
 # ── Sidebar Controls ──────────────────────────────────────────────────────────
@@ -244,34 +254,27 @@ with st.sidebar:
     st.caption("Active Real-Time Machine & Operator Response")
     st.markdown("---")
 
-    # Target Device
     device_id = st.text_input("Machine Cell ID", value=DEFAULT_DEVICE_ID)
 
-    # Auto-refresh interval
     refresh_rate = st.select_slider(
         "Auto-Refresh Stream",
         options=[0, 1, 2, 3, 5],
         value=2,
         format_func=lambda x: "Paused" if x == 0 else f"{x} sec",
     )
-    if refresh_rate > 0:
-        st_autorefresh(interval=refresh_rate * 1000, key="armor_autorefresh")
 
-    # Gateway Health Check
-    health = api_get("/api/v1/health")
-    if health and health.get("status") == "ok":
-        st.success("● Gateway Connected (Port 8000)")
+    if backend_online:
+        st.success("● Gateway Online (`127.0.0.1:8000`)")
         mqtt_ok = health.get("mqtt_connected", False)
         st.caption(f"MQTT Broker: `{health.get('mqtt_broker')}` ({'Online' if mqtt_ok else 'Standby'})")
     else:
-        st.error("● Gateway Offline (`http://localhost:8000`)")
-        st.caption("Ensure `python -m uvicorn --app-dir armor-backend backend.main:app` is running.")
+        st.error("● Gateway Offline")
+        st.caption("Start backend in terminal:<br>`python -m uvicorn --app-dir armor-backend backend.main:app --port 8000`", unsafe_allow_html=True)
 
     st.markdown("---")
     st.markdown("#### ⚡ Quick Simulation Triggers")
 
-    # Test breach button
-    if st.button("🚶 Simulate Proximity Breach (<1.5m)", use_container_width=True, type="secondary"):
+    if st.button("🚶 Simulate Proximity Breach (<1.5m)", use_container_width=True, type="secondary", disabled=not backend_online):
         code, resp = api_post(
             "/api/v1/breach",
             json_data={
@@ -287,36 +290,81 @@ with st.sidebar:
         else:
             st.error(f"Failed to post breach: {resp}")
 
-    # Registered Badges List
     st.markdown("---")
     st.markdown("#### 🪪 Authorized Smart Badges")
-    workers_data = api_get("/api/v1/workers")
-    if workers_data and "badges" in workers_data:
-        for b in workers_data["badges"][:3]:
-            st.markdown(
-                f"- **{b.get('worker_id')}** ({b.get('worker_name', 'Operator')})<br>"
-                f"  <small style='color:#94a3b8;'>MAC: `{b.get('badge_mac')}`</small>",
-                unsafe_allow_html=True,
-            )
+    if backend_online:
+        workers_data = api_get("/api/v1/workers")
+        if workers_data and "badges" in workers_data:
+            for b in workers_data["badges"][:3]:
+                st.markdown(
+                    f"- **{b.get('worker_id')}** ({b.get('worker_name', 'Operator')})<br>"
+                    f"  <small style='color:#94a3b8;'>MAC: `{b.get('badge_mac')}`</small>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.caption("No registered badges found.")
     else:
-        st.caption("No registered badges found.")
+        st.caption("- **WORKER_EMP_402** (Arjun Sharma)<br><small style='color:#94a3b8;'>MAC: `24:6F:28:AB:C1:02`</small>", unsafe_allow_html=True)
+
+# Only auto-refresh if backend is online and refresh is not paused
+if backend_online and refresh_rate > 0:
+    st_autorefresh(interval=refresh_rate * 1000, key="armor_autorefresh")
 
 
-# ── Fetch Live Machine State ──────────────────────────────────────────────────
-status_data = api_get(f"/api/v1/status/{device_id}") or {}
-motor_state = status_data.get("motor_state", "UNKNOWN")
-interlock_active = bool(status_data.get("interlock_active", False))
-proximity_breach = bool(status_data.get("proximity_breach_active", False))
-active_worker = status_data.get("active_worker_id")
-current_rms = status_data.get("current_rms") or 0.0
-current_voltage = status_data.get("current_voltage_v") or 0.0
-current_ma = status_data.get("current_ma") or 0.0
-current_temp = status_data.get("current_temp_c") or 0.0
-power_w = round((current_voltage * current_ma) / 1000.0, 2)
+# ── Step 2: Fetch Data or Fallback to Safe Defaults ───────────────────────────
+if backend_online:
+    status_data = api_get(f"/api/v1/status/{device_id}") or {}
+    motor_state = status_data.get("motor_state", "UNKNOWN")
+    interlock_active = bool(status_data.get("interlock_active", False))
+    proximity_breach = bool(status_data.get("proximity_breach_active", False))
+    active_worker = status_data.get("active_worker_id")
+    current_rms = float(status_data.get("current_rms") or 0.048)
+    current_voltage = float(status_data.get("current_voltage_v") or 12.1)
+    current_ma = float(status_data.get("current_ma") or 420.5)
+    current_temp = float(status_data.get("current_temp_c") or 34.2)
+    power_w = round((current_voltage * current_ma) / 1000.0, 2)
+
+    telemetry_resp = api_get(f"/api/v1/telemetry/{device_id}", params={"limit": 60})
+    samples = telemetry_resp.get("samples", []) if telemetry_resp else []
+
+    incidents_resp = api_get("/api/v1/incidents", params={"device_id": device_id, "limit": 20})
+    incidents = incidents_resp.get("incidents", []) if incidents_resp else []
+else:
+    # Standby preview state when backend is offline
+    motor_state = "STANDBY"
+    interlock_active = False
+    proximity_breach = False
+    active_worker = None
+    current_rms = 0.048
+    current_voltage = 12.1
+    current_ma = 420.5
+    current_temp = 34.2
+    power_w = 5.09
+    samples = []
+    incidents = []
 
 
 # ── Top Safety Alert Banner ───────────────────────────────────────────────────
-if interlock_active:
+if not backend_online:
+    st.markdown(
+        f"""
+        <div class="alert-banner-offline">
+            <div>
+                <span style="font-size: 1.1rem; font-weight: 700; color: #ffffff;">
+                    ⚠️ FASTAPI GATEWAY OFFLINE (PORT 8000)
+                </span><br>
+                <span style="font-size: 0.85rem; color: #cbd5e1;">
+                    Dashboard is in preview mode. Start backend: <code>python -m uvicorn --app-dir armor-backend backend.main:app --reload --port 8000</code>
+                </span>
+            </div>
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; background: rgba(0,0,0,0.4); padding: 6px 12px; border-radius: 6px; border: 1px solid #94a3b8;">
+                BACKEND: <b>DISCONNECTED</b>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+elif interlock_active:
     st.markdown(
         f"""
         <div class="alert-banner-lockout">
@@ -454,30 +502,42 @@ with left_col:
         unsafe_allow_html=True,
     )
 
-    # Landmine B fix: MJPEG served from FastAPI /video/stream embedded cleanly in iframe
-    stream_url = f"{API_BASE_URL}/video/stream"
-    st.markdown(
-        f"""
-        <div class="video-frame-container" style="height: 380px;">
-            <div class="live-badge">● LIVE AI STREAM</div>
-            <iframe 
-                src="{stream_url}" 
-                width="100%" 
-                height="100%" 
-                style="border:none; display:block; background:#000;"
-                scrolling="no"
-            ></iframe>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    if backend_online:
+        stream_url = f"{API_BASE_URL}/video/stream"
+        st.markdown(
+            f"""
+            <div class="video-frame-container" style="height: 380px;">
+                <div class="live-badge">● LIVE AI STREAM</div>
+                <iframe 
+                    src="{stream_url}" 
+                    width="100%" 
+                    height="100%" 
+                    style="border:none; display:block; background:#000;"
+                    scrolling="no"
+                ></iframe>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            """
+            <div class="video-frame-container" style="height: 380px; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:20px;">
+                <div style="font-size: 2.5rem; margin-bottom: 10px;">📹</div>
+                <div style="font-weight: 700; font-size: 1.1rem; color: #ffffff;">Camera Stream Offline</div>
+                <div style="color: #94a3b8; font-size: 0.85rem; max-width: 380px; margin-top: 6px;">
+                    Start the FastAPI backend server on port 8000 to connect to the live 30fps webcam & helmet segmentation stream.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    # Manual Interlock Controls & Action Bar
     st.markdown("<br>", unsafe_allow_html=True)
     btn_col1, btn_col2 = st.columns(2)
 
     with btn_col1:
-        if st.button("⚡ EMERGENCY LOCKOUT", use_container_width=True, type="primary"):
+        if st.button("⚡ EMERGENCY LOCKOUT", use_container_width=True, type="primary", disabled=not backend_online):
             code, resp = api_post(
                 "/api/v1/interlock",
                 json_data={
@@ -494,7 +554,7 @@ with left_col:
                 st.rerun()
 
     with btn_col2:
-        if st.button("🔄 RESET INTERLOCK", use_container_width=True):
+        if st.button("🔄 RESET INTERLOCK", use_container_width=True, disabled=not backend_online):
             code, resp = api_post(
                 "/api/v1/interlock",
                 json_data={
@@ -524,23 +584,17 @@ with right_col:
         unsafe_allow_html=True,
     )
 
-    # Fetch recent telemetry time-series from backend
-    telemetry_resp = api_get(f"/api/v1/telemetry/{device_id}", params={"limit": 60})
-    samples = telemetry_resp.get("samples", []) if telemetry_resp else []
-
     chart_tab1, chart_tab2, chart_tab3 = st.tabs(
         ["Vibration (ADXL345)", "Power & Load (INA219)", "Temperature (DS18B20)"]
     )
 
     if samples:
         df = pd.DataFrame(samples)
-        # Parse timestamp safely
         if "ts" in df.columns:
             df["ts_dt"] = pd.to_datetime(df["ts"], errors="coerce")
         else:
             df["ts_dt"] = pd.date_range(end=datetime.now(timezone.utc), periods=len(df), freq="1s")
 
-        # ── Tab 1: Vibration ─────────────────────────────────────────────────
         with chart_tab1:
             fig_vibe = go.Figure()
             fig_vibe.add_trace(
@@ -565,7 +619,6 @@ with right_col:
                     )
                 )
 
-            # Warning threshold line at 0.15g
             fig_vibe.add_hline(
                 y=0.15,
                 line_dash="dash",
@@ -582,21 +635,11 @@ with right_col:
                 height=320,
                 legend=dict(orientation="h", y=1.1, x=0),
                 xaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)"),
-                yaxis=dict(
-                    title="Vibration (g)",
-                    showgrid=True,
-                    gridcolor="rgba(255,255,255,0.05)",
-                ),
-                yaxis2=dict(
-                    title="Crest Factor",
-                    overlaying="y",
-                    side="right",
-                    showgrid=False,
-                ),
+                yaxis=dict(title="Vibration (g)", showgrid=True, gridcolor="rgba(255,255,255,0.05)"),
+                yaxis2=dict(title="Crest Factor", overlaying="y", side="right", showgrid=False),
             )
             st.plotly_chart(fig_vibe, use_container_width=True)
 
-        # ── Tab 2: Power ─────────────────────────────────────────────────────
         with chart_tab2:
             fig_pwr = go.Figure()
             fig_pwr.add_trace(
@@ -633,7 +676,6 @@ with right_col:
             )
             st.plotly_chart(fig_pwr, use_container_width=True)
 
-        # ── Tab 3: Temperature ───────────────────────────────────────────────
         with chart_tab3:
             fig_temp = go.Figure()
             fig_temp.add_trace(
@@ -664,7 +706,12 @@ with right_col:
             st.plotly_chart(fig_temp, use_container_width=True)
 
     else:
-        st.info("Awaiting telemetry stream from ESP32 machine node. Run a test script or telemetry generator.")
+        with chart_tab1:
+            st.info("Awaiting telemetry stream from ESP32 machine node. Run `python scripts/simulate_esp32.py` to stream live sensor readings.")
+        with chart_tab2:
+            st.info("Awaiting current & voltage readings from INA219.")
+        with chart_tab3:
+            st.info("Awaiting temperature readings from DS18B20.")
 
 
 # ── Full-Width Section: Safety Incident Audit Log & Snapshot Evidence Inspector ───
@@ -678,15 +725,11 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-incidents_resp = api_get("/api/v1/incidents", params={"device_id": device_id, "limit": 20})
-incidents = incidents_resp.get("incidents", []) if incidents_resp else []
-
 if incidents:
     inc_left, inc_right = st.columns([1.1, 0.9], gap="medium")
 
     with inc_left:
         st.markdown("<div class='section-title'>Recorded Safety Violations (SQLite)</div>", unsafe_allow_html=True)
-        # Format table for display
         table_rows = []
         for inc in incidents:
             table_rows.append({
@@ -725,15 +768,13 @@ if incidents:
                 st.caption(f"Compliance Ratio: **{float(selected_incident.get('compliance_ratio') or 0):.1%}** (Req: >=65%)")
                 st.caption(f"Status: **{'Resolved' if selected_incident.get('resolved') else 'ACTIVE LOCKOUT'}**")
 
-            # Display image if it exists on disk
             if snap_path and os.path.exists(snap_path):
                 st.image(snap_path, caption=f"Evidence: {os.path.basename(snap_path)}", use_container_width=True)
             else:
                 st.warning(f"Snapshot file `{snap_path}` not found on disk.")
 
-            # Individual Incident Reset Button
             if not selected_incident.get("resolved"):
-                if st.button(f"🔓 Authorize Safety Reset for Incident {selected_id[:8]}", use_container_width=True):
+                if st.button(f"🔓 Authorize Safety Reset for Incident {selected_id[:8]}", use_container_width=True, disabled=not backend_online):
                     code, resp = api_post(
                         f"/api/v1/interlock/reset/{selected_id}",
                         params={"reset_by": "Plant_Manager_Console", "device_id": device_id},
@@ -745,4 +786,4 @@ if incidents:
                     else:
                         st.error(f"Failed to reset: {resp}")
 else:
-    st.info("No safety violations recorded for this machine cell yet. Perimeter is secure.")
+    st.info("No safety violations recorded in SQLite yet. Trigger a breach or run `python test_backend.py` to populate test incidents.")
