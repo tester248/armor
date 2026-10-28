@@ -137,6 +137,35 @@ class ArmorStore:
                     ts          TEXT    NOT NULL,
                     created_at  TEXT    DEFAULT CURRENT_TIMESTAMP
                 );
+
+                -- ML calibration results and model packages
+                CREATE TABLE IF NOT EXISTS calibrations (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    machine_id      TEXT    NOT NULL,
+                    device_id       TEXT    NOT NULL,
+                    model_package   TEXT    NOT NULL,
+                    baseline_stats  TEXT,
+                    quality         REAL,
+                    window_count    INTEGER,
+                    created_at      TEXT    DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_cal_machine_device
+                    ON calibrations (machine_id, device_id, created_at DESC);
+
+                -- Anomaly event log
+                CREATE TABLE IF NOT EXISTS anomaly_log (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    machine_id  TEXT    NOT NULL,
+                    device_id   TEXT    NOT NULL,
+                    score       REAL,
+                    threshold   REAL,
+                    is_anomaly  INTEGER DEFAULT 0,
+                    created_at  TEXT    DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_anomaly_machine_device
+                    ON anomaly_log (machine_id, device_id, created_at DESC);
                 """
             )
             self._conn.commit()
