@@ -400,6 +400,18 @@ def digital_twin():
     return HTMLResponse(content=twin_path.read_text(encoding="utf-8"))
 
 
+@app.post("/api/v1/vision/inspect", tags=["Vision"])
+def vision_inspect(worker_id: str = "WORKER_EMP_402", device_id: str = "machino_node_01"):
+    """
+    Run helmet compliance check using the backend's camera-enabled VisionEngine.
+    Called by the Streamlit dashboard manual test button.
+    Runs person-detection gate first, then Roboflow helmet check if a person is present.
+    """
+    if vision_engine is None:
+        raise HTTPException(status_code=503, detail="Vision engine not available.")
+    result = vision_engine.inspect(worker_id=worker_id, device_id=device_id)
+    return result
+
 
 # Health
 # ══════════════════════════════════════════════════════════════════════════════

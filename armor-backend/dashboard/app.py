@@ -197,11 +197,11 @@ st.markdown(
         position: relative;
         background: #020617;
     }
-    /* Force MJPEG stream iframe to fill its container (fix white space on camera feed) */
+    /* Force MJPEG stream iframe to fill its container without cropping */
     .video-frame-container iframe {
         width: 100% !important;
         height: 100% !important;
-        object-fit: cover !important;
+        object-fit: contain !important;
         object-position: center !important;
         display: block !important;
     }
@@ -1117,9 +1117,23 @@ with test_cols[0]:
     ):
         with st.spinner("Running helmet inspection..."):
             try:
-                result = vision_engine.inspect(worker_id=test_worker_id, device_id=device_id)
-                st.session_state.test_results["vision"] = result
-                st.rerun()
+                code, resp = api_post(
+                    "/api/v1/vision/inspect",
+                    params={"worker_id": test_worker_id, "device_id": device_id},
+                    timeout=30.0,
+                )
+                if code == 200:
+                    st.session_state.test_results["vision"] = resp
+                    st.rerun()
+                else:
+                    st.error(f"Vision inspection failed (HTTP {code}): {resp}")
+                    st.session_state.test_results["vision"] = {
+                        "compliant": None,
+                        "label": "ERROR",
+                        "compliance_ratio": 0.0,
+                        "worker_id": test_worker_id,
+                        "snapshot_path": None,
+                    }
             except Exception as e:
                 st.error(f"Vision inspection failed: {e}")
                 st.session_state.test_results["vision"] = {
@@ -1139,8 +1153,15 @@ with test_cols[0]:
         ts = r.get("timestamp", "")
 
         if compliant is None:
-            st.error(f"🔴 VISION UNAVAILABLE — {label}")
-            st.caption("No ROBOFLOW_API_KEY configured or model not loaded. Interlock will NOT auto-trigger.")
+            if label == "SCANNING":
+                st.error(f"🔴 VISION SCANNING — no person detected in frame")
+                st.caption("Point the camera at a worker. Helmet check runs automatically when a person is detected.")
+            elif label == "VISION_UNAVAILABLE":
+                st.error(f"🔴 VISION UNAVAILABLE — {label}")
+                st.caption("No ROBOFLOW_API_KEY configured or model not loaded. Interlock will NOT auto-trigger.")
+            else:
+                st.error(f"🔴 VISION {label}")
+                st.caption("Helmet check could not run. Check camera and backend logs.")
         elif compliant:
             st.success(f"✅ HELMET PASS — compliance ratio: {ratio:.1%}")
             st.caption(f"Worker: {r.get('worker_id')} | Time: {ts[:19]}")
