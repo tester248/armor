@@ -27,6 +27,13 @@
 #include <ArduinoJson.h>
 #include <time.h>
 
+// ==============================================================================
+// BENCH TEST MODE:
+// Set to true while testing both ESPs on your desk to prevent emergency lockouts.
+// Set to false for actual live deployment / presentation demo.
+// ==============================================================================
+#define BENCH_TEST_MODE           true
+
 // ---------- WiFi & MQTT Config ----------
 // MQTT_BROKER must be the laptop running the ARMOR FastAPI backend.
 // Reserve a static DHCP lease for that laptop so this address does not drift.
@@ -517,9 +524,14 @@ void core1Task(void* pv) {
             }
             char buf[512];
             serializeJson(doc, buf);
+#if !BENCH_TEST_MODE
             mqtt.publish("machinocare/v1/events/proximity", buf, false);
-            Serial.printf("[SAFETY] Badge %s (%s) at %.2f m (RSSI %.1f)\r\n",
+            Serial.printf("[SAFETY] Badge %s (%s) at %.2f m (RSSI %.1f) -> LOCKOUT SENT\r\n",
                           badgeId, macStr, distance, gEmaRssi);
+#else
+            Serial.printf("[BENCH TEST] Badge breach detected: %s at %.2f m (RSSI %.1f) [Lockout suppressed]\r\n",
+                          badgeId, distance, gEmaRssi);
+#endif
           }
         }
       }
@@ -535,6 +547,9 @@ void setup() {
   delay(1000);
   Serial.println("\r\n=======================================================");
   Serial.println("  ARMOR - Machine Node + Blynk IoT Remote Actuation    ");
+#if BENCH_TEST_MODE
+  Serial.println("  *** BENCH TEST MODE: Proximity Lockouts SUPPRESSED ***");
+#endif
   Serial.println("=======================================================");
 
   // Relay Pins (Safe initialization: start OFF)
