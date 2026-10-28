@@ -10,3 +10,6 @@ streamlit>=1.44.0
 plotly>=5.22.0
 streamlit-autorefresh>=1.0.1
 opencv-python>=4.10.0
+# Roboflow Inference SDK (RF-DETR + SAM3 helmet workflow). Optional; if not
+# installed, the backend falls back to the built-in stub/YOLO path.
+inference_sdk>=1.8.0

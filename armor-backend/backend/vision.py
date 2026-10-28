@@ -43,6 +43,14 @@ YOLO_MODEL_PATH = os.getenv("YOLO_MODEL_PATH", "").strip()
 SNAPSHOT_DIR = Path(os.getenv("SNAPSHOT_DIR", "data/snapshots"))
 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
+# --- Roboflow Workflow (RF-DETR + SAM 3 helmet check) ---
+ROBOFLOW_API_KEY = os.getenv("ROBOFLOW_API_KEY", "").strip()
+ROBOFLOW_WORKSPACE = os.getenv("ROBOFLOW_WORKSPACE", "ashwin-mathur").strip()
+ROBOFLOW_WORKFLOW_ID = os.getenv(
+    "ROBOFLOW_WORKFLOW_ID", "helmet-check-hackathon-demo-1793134805931"
+).strip()
+ROBOFLOW_API_URL = os.getenv("ROBOFLOW_API_URL", "https://serverless.roboflow.com").strip()
+
 
 # ── Result dataclass (plain dict so no Pydantic import needed here) ────────────
 def _make_result(
@@ -86,6 +94,171 @@ def _try_load_yolo() -> bool:
     except Exception as e:
         print(f"[VisionEngine] Could not load YOLO model: {e}. Using stub.")
         return False
+
+
+# �� Roboflow Workflow (RF-DETR + SAM 3) ��������������������������������������
+_roboflow_client = None
+_roboflow_lock = threading.Lock()
+
+
+def _try_load_roboflow() -> bool:
+    """Try to build a Roboflow InferenceHTTPClient. Returns True if configured."""
+    global _roboflow_client
+    if not ROBOFLOW_API_KEY:
+        return False
+    try:
+        from inference_sdk import InferenceHTTPClient, InferenceConfiguration  # type: ignore
+
+        client = InferenceHTTPClient(
+            api_url=ROBOFLOW_API_URL, api_key=ROBOFLOW_API_KEY
+        ).configure(InferenceConfiguration(api_key_transport="header"))
+        with _roboflow_lock:
+            _roboflow_client = client
+        print(f"[VisionEngine] Roboflow workflow configured: {ROBOFLOW_WORKSPACE}/{ROBOFLOW_WORKFLOW_ID}")
+        return True
+    except Exception as e:
+        print(f"[VisionEngine] Could not configure Roboflow client: {e}.")
+        return False
+
+
+def _extract_image_from_result(result) -> bytes | None:
+    """Best-effort extraction of image bytes from a workflow result value."""
+    if result is None:
+        return None
+    if isinstance(result, dict):
+        for key in ("value", "image", "data", "base64"):
+            if key in result:
+                img = _extract_image_from_result(result[key])
+                if img is not None:
+                    return img
+        return None
+    if isinstance(result, (bytes, bytearray)):
+        return bytes(result)
+    if isinstance(result, str):
+        s = result.strip()
+        if s.startswith("http://") or s.startswith("https://"):
+            try:
+                import requests
+
+                r = requests.get(s, timeout=10)
+                if r.status_code == 200:
+                    return r.content
+            except Exception:
+                return None
+            return None
+        try:
+            import base64
+
+            if "," in s and s.split(",", 1)[0].startswith("data:"):
+                s = s.split(",", 1)[1]
+            return base64.b64decode(s, validate=False)
+        except Exception:
+            return None
+    if isinstance(result, (list, tuple)) and result:
+        return _extract_image_from_result(result[0])
+    return None
+
+
+def _roboflow_status_to_compliant(status) -> bool:
+    """Interpret the workflow's helmet_status string."""
+    if status is None:
+        return False
+    s = str(status).strip().lower()
+    if not s:
+        return False
+    if any(tok in s for tok in ("missing", "no helmet", "no-helmet", "absent", "without", "not detected", "fail")):
+        return False
+    if any(tok in s for tok in ("helmet", "present", "pass", "compliant", "detected")):
+        return True
+    return False
+
+
+def _roboflow_inspect(frame, worker_id):
+    """Run the Roboflow helmet workflow on a frame."""
+    import tempfile
+
+    with _roboflow_lock:
+        client = _roboflow_client
+
+    if client is None:
+        return _stub_inspect(frame, worker_id)
+
+    h, w = frame.shape[:2]
+    annotated = frame.copy()
+
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".jpg")
+    os.close(tmp_fd)
+    cv2.imwrite(tmp_path, frame)
+
+    try:
+        result = client.run_workflow(
+            workspace_name=ROBOFLOW_WORKSPACE,
+            workflow_id=ROBOFLOW_WORKFLOW_ID,
+            images={"image": tmp_path},
+            use_cache=True,
+        )
+    except Exception as e:
+        print(f"[VisionEngine] Roboflow workflow call failed: {e}")
+        return _stub_inspect(frame, worker_id)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+    entry = result[0] if isinstance(result, (list, tuple)) and result else result
+    if not isinstance(entry, dict):
+        print(f"[VisionEngine] Unexpected Roboflow result type: {type(entry)}")
+        return _stub_inspect(frame, worker_id)
+
+    print(f"[VisionEngine] Roboflow result keys: {list(entry.keys())}")
+
+    helmet_status = entry.get("helmet_status")
+    if helmet_status is None:
+        for k in ("status", "helmet", "result"):
+            if k in entry:
+                helmet_status = entry[k]
+                break
+
+    print(f"[VisionEngine] Roboflow helmet_status: {helmet_status!r}")
+
+    compliant = _roboflow_status_to_compliant(helmet_status)
+    label = "HELMET_PASS" if compliant else "HELMET_FAIL"
+    compliance_ratio = 0.9 if compliant else 0.1
+    colour = (0, 200, 80) if compliant else (0, 60, 220)
+
+    out_img_bytes = None
+    for key in ("output_image", "bounding_box_image", "segmented_helmet_image"):
+        if key in entry:
+            out_img_bytes = _extract_image_from_result(entry[key])
+            if out_img_bytes is not None:
+                break
+
+    if out_img_bytes is not None:
+        try:
+            arr = np.frombuffer(out_img_bytes, dtype=np.uint8)
+            decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if decoded is not None:
+                annotated = decoded
+        except Exception as e:
+            print(f"[VisionEngine] Could not decode Roboflow output image: {e}")
+
+    if annotated is frame:
+        annotated = frame.copy()
+        cv2.putText(
+            annotated, f"{label}  status={helmet_status}", (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.7, colour, 2,
+        )
+        cv2.putText(
+            annotated, f"Worker: {worker_id}", (10, h - 20),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1,
+        )
+        cv2.putText(
+            annotated, "[ Roboflow RF-DETR + SAM 3 ]", (10, 55),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1,
+        )
+
+    return compliant, compliance_ratio, label, annotated
 
 
 # ── Stub compliance check (no YOLO model) ─────────────────────────────────────
@@ -240,6 +413,7 @@ class VisionEngine:
         self._frame_lock = threading.Lock()
         self._running = False
         self._thread: threading.Thread | None = None
+        self._roboflow_loaded = _try_load_roboflow()
         self._yolo_loaded = _try_load_yolo()
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -318,7 +492,9 @@ class VisionEngine:
         """
         frame = self._get_frame()
 
-        if self._yolo_loaded:
+        if self._roboflow_loaded:
+            compliant, ratio, label, annotated = _roboflow_inspect(frame, worker_id)
+        elif self._yolo_loaded:
             compliant, ratio, label, annotated = _yolo_inspect(frame, worker_id)
         else:
             compliant, ratio, label, annotated = _stub_inspect(frame, worker_id)
