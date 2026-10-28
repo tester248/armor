@@ -44,7 +44,7 @@ import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 # ── Load env ──────────────────────────────────────────────────────────────────
 _ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
@@ -669,6 +669,41 @@ def video_stream():
     )
 
 
+@app.get("/api/v1/vision/frame", tags=["Vision"])
+def vision_frame():
+    """
+    Single JPEG frame of the live camera.
+
+    React Native's Image component cannot decode a multipart MJPEG stream on
+    Android/iOS, so the mobile app polls this endpoint (~4 fps) and swaps the
+    image URI. Works on web and native, and lets the client show an explicit
+    camera-offline state instead of an unexplained black rectangle.
+    """
+    import cv2
+
+    status = vision_engine.get_feed_status()
+    if not status["camera_available"]:
+        raise HTTPException(
+            status_code=503,
+            detail="Camera unavailable. Check CAMERA_SOURCE / USB connection.",
+        )
+    frame = vision_engine.current_frame()
+    ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    if not ok:
+        raise HTTPException(status_code=500, detail="JPEG encode failed")
+    return Response(
+        content=jpeg.tobytes(),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
+
+
+@app.get("/api/v1/vision/status", tags=["Vision"])
+def vision_status():
+    """Camera + model readiness for the mobile Vision screen."""
+    return {**vision_engine.get_feed_status(), "timestamp": _utc_now()}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 3D Digital Twin (embedded in Streamlit via <iframe>)
 # ----------------------------------------------------------------------------
@@ -787,6 +822,8 @@ def health():
         "service": "armor-gateway",
         "mqtt_broker": f"{MQTT_BROKER}:{MQTT_PORT}",
         "mqtt_connected": _mqtt_client is not None,
+        "camera_available": vision_engine.get_feed_status()["camera_available"],
+        "roboflow_configured": vision_engine.get_feed_status()["roboflow_configured"],
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "timestamp": _utc_now(),
     }
@@ -895,14 +932,38 @@ def proximity_breach(payload: ProximityBreachEvent):
 @app.post("/api/v1/interlock", status_code=200, tags=["Safety"])
 def issue_interlock(payload: InterlockCommand, device_id: str = Query(default="machino_node_01")):
     """
-    Issue a LOCKOUT or RESET command to Machine Node ESP32.
-    Publishes to MQTT topic: armor/{device_id}/interlock
+    Issue a LOCKOUT, RESET, START or STOP command to Machine Node ESP32.
+    Publishes to MQTT topic: machinocare/v1/devices/{device_id}/interlock
     JSON schema per ARMOR spec section 5.3
+
+    START/STOP mirror the Blynk V0 motor switch. They never override an active
+    safety interlock: the firmware only runs the motor when
+    ``motor_requested && !interlock``.
     """
     cmd_dict = payload.model_dump(mode="json")
     cmd_dict["device_id"] = device_id
 
-    if payload.command == "LOCKOUT":
+    if payload.command == "START":
+        state = store.get_machine_state(device_id)
+        if state.get("interlock_active"):
+            raise HTTPException(
+                status_code=409,
+                detail="Interlock is active. Reset the lockout before starting the motor.",
+            )
+        store.set_machine_state(device_id, {
+            "motor_state":      "RUNNING",
+            "interlock_active": False,
+        })
+        store.log_interlock(cmd_dict)
+
+    elif payload.command == "STOP":
+        store.set_machine_state(device_id, {
+            "motor_state":      "IDLE",
+            "interlock_active": False,
+        })
+        store.log_interlock(cmd_dict)
+
+    elif payload.command == "LOCKOUT":
         store.set_machine_state(device_id, {
             "motor_state":     "LOCKED",
             "interlock_active": True,

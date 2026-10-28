@@ -1079,6 +1079,25 @@ class VisionEngine:
                 return self._latest_frame.copy()
         return self._generate_fallback_frame()
 
+    # -- Public accessors for the HTTP API -------------------------------
+    def current_frame(self) -> np.ndarray:
+        """Return a copy of the latest BGR frame for single-shot JPEG serving."""
+        return self._get_frame()
+
+    def get_feed_status(self) -> dict[str, Any]:
+        """Camera / model readiness for the mobile Vision screen."""
+        cap = self._cap
+        with self._frame_lock:
+            frame_ready = self._latest_frame is not None
+        return {
+            "camera_available": bool(cap is not None and cap.isOpened()),
+            "camera_source": str(CAMERA_SOURCE),
+            "roboflow_configured": bool(self._roboflow_available),
+            "vision_state": self._vision_state,
+            "frame_ready": frame_ready,
+            "snapshot_dir": str(SNAPSHOT_DIR),
+        }
+
     def _generate_fallback_frame(self) -> np.ndarray:
         img = np.zeros((480, 640, 3), dtype=np.uint8)
         img[:] = (20, 24, 33)

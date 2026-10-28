@@ -100,7 +100,7 @@ class InterlockCommand(BaseModel):
     HTTP:  POST /api/v1/interlock
     Payload sent to machine ESP32 to actuate L298N Enable pin.
     """
-    command: str = Field(..., description="LOCKOUT | RESET")
+    command: str = Field(..., description="LOCKOUT | RESET | START | STOP")
     source: str = Field(default="VISION_AI_PIPELINE", description="Source triggering action")
     reason: Optional[str] = Field(default=None, description="Explanation for interlock actuation")
     worker_id: Optional[str] = Field(default=None, description="Worker associated with breach")
