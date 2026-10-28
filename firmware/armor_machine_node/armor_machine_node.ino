@@ -32,7 +32,8 @@
 // Reserve a static DHCP lease for that laptop so this address does not drift.
 const char* WIFI_SSID     = "ARMOR";
 const char* WIFI_PASSWORD = "12345678";
-const char* MQTT_BROKER   = "10.24.103.35";   // Backend host (laptop) on the hotspot
+// const char* MQTT_BROKER   = "10.24.103.35";   // Backend host (laptop) on the hotspot
+const char* MQTT_BROKER   = "10.24.103.187";   // Backend host (laptop) on the hotspot
 const uint16_t MQTT_PORT  = 1883;
 const char* DEVICE_ID     = "machino_node_01";
 
@@ -423,11 +424,18 @@ void core1Task(void* pv) {
         snprintf(badgeStr, sizeof(badgeStr), "NOT SEEN");
       }
 
-      Serial.printf("[TELEMETRY] Temp: %4.1f C | Bus: %5.2f V | Current: %5.1f mA | Motor: %-7s | Blynk: %-7s | MQTT: %-9s | Badge: %s\r\n",
+      char mqttStr[48];
+      if (mqtt.connected()) {
+        snprintf(mqttStr, sizeof(mqttStr), "CONNECTED (%s)", MQTT_BROKER);
+      } else {
+        snprintf(mqttStr, sizeof(mqttStr), "OFFLINE");
+      }
+
+      Serial.printf("[TELEMETRY] Temp: %4.1f C | Bus: %5.2f V | Current: %5.1f mA | Motor: %-7s | Blynk: %-7s | MQTT: %-25s | Badge: %s\r\n",
                     gTempC, gVoltageV, gCurrentMa,
                     motorRunning ? "RUNNING" : "STOPPED",
                     Blynk.connected() ? "ONLINE" : "OFFLINE",
-                    mqtt.connected() ? "CONNECTED" : "OFFLINE",
+                    mqttStr,
                     badgeStr);
 
       // Push Live Telemetry to Blynk Virtual Pins
