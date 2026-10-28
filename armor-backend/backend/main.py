@@ -51,7 +51,7 @@ load_dotenv(_ENV_PATH)
 
 # ── Local imports ─────────────────────────────────────────────────────────────
 from backend.storage import ArmorStore
-from backend.vision import vision_engine
+from backend.vision import vision_engine, SNAPSHOT_DIR
 from backend.models import (
     TelemetryIngestRequest,
     ProximityBreachEvent,
@@ -400,17 +400,48 @@ def digital_twin():
     return HTMLResponse(content=twin_path.read_text(encoding="utf-8"))
 
 
+@app.post("/api/v1/vision/inspect/start", tags=["Vision"])
+def vision_inspect_start(
+    worker_id: str = "WORKER_EMP_402", device_id: str = "machino_node_01"
+):
+    """Start an async helmet inspection. Waits for a person in the camera,
+    freezes that frame, runs Roboflow, returns immediately.
+    Poll /api/v1/vision/inspect/status for the result.
+    """
+    if vision_engine is None:
+        raise HTTPException(status_code=503, detail="Vision engine not available.")
+    return vision_engine.start_inspection(worker_id, device_id)
+
+
+@app.get("/api/v1/vision/inspect/status", tags=["Vision"])
+def vision_inspect_status():
+    """Return the current status of a pending inspection (for dashboard polling)."""
+    if vision_engine is None:
+        raise HTTPException(status_code=503, detail="Vision engine not available.")
+    return vision_engine.get_inspection_status()
+
+
 @app.post("/api/v1/vision/inspect", tags=["Vision"])
 def vision_inspect(worker_id: str = "WORKER_EMP_402", device_id: str = "machino_node_01"):
     """
-    Run helmet compliance check using the backend's camera-enabled VisionEngine.
-    Called by the Streamlit dashboard manual test button.
+    Synchronous helmet compliance check (breach handler path).
     Runs person-detection gate first, then Roboflow helmet check if a person is present.
     """
     if vision_engine is None:
         raise HTTPException(status_code=503, detail="Vision engine not available.")
     result = vision_engine.inspect(worker_id=worker_id, device_id=device_id)
     return result
+
+
+@app.get("/api/v1/vision/snapshot/{filename}", tags=["Vision"])
+def vision_snapshot(filename: str):
+    """Serve a saved inspection snapshot image."""
+    from fastapi.responses import FileResponse
+
+    path = SNAPSHOT_DIR / filename
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Snapshot not found.")
+    return FileResponse(path)
 
 
 # Health

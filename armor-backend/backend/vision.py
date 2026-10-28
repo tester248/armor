@@ -574,6 +574,11 @@ class VisionEngine:
         self._vision_state: str = "SCANNING"
         self._last_helmet_result: dict | None = None
 
+        # Pending async inspection (triggered by dashboard "Run Helmet Inspection")
+        # Statuses: waiting_for_person -> processing -> complete
+        self._pending_inspection: dict | None = None
+        self._pending_lock = threading.Lock()
+
         if ROBOFLOW_API_KEY:
             try:
                 self._roboflow_client = RoboflowClient(
@@ -632,6 +637,29 @@ class VisionEngine:
                     if person_present and self._vision_state == "SCANNING":
                         self._vision_state = "PERSON_DETECTED"
                         print(f"[VisionEngine] Person detected ({len(person_boxes)} box(es))")
+
+                    # ── Pending inspection: wait for person, then freeze + Roboflow ──
+                    with self._pending_lock:
+                        pending = self._pending_inspection
+                    if (
+                        pending
+                        and pending["status"] == "waiting_for_person"
+                        and person_present
+                    ):
+                        frozen_frame = frame.copy()
+                        with self._pending_lock:
+                            self._pending_inspection["status"] = "processing"
+                            self._pending_inspection["processing_at"] = (
+                                datetime.now(timezone.utc).isoformat()
+                            )
+                        # Run Roboflow in a separate thread so the capture loop
+                        # (and MJPEG stream) keeps running at full fps.
+                        t = threading.Thread(
+                            target=self._run_pending_inspection,
+                            args=(frozen_frame, pending["worker_id"], pending["device_id"]),
+                            daemon=True,
+                        )
+                        t.start()
 
                     with self._frame_lock:
                         self._latest_frame = frame
@@ -814,6 +842,94 @@ class VisionEngine:
             }
 
         return result
+
+    # ── Async inspection (dashboard-triggered) ────────────────────────────────
+    def _run_pending_inspection(
+        self, frame: np.ndarray, worker_id: str, device_id: str
+    ) -> None:
+        """Run Roboflow helmet check on a frozen frame (background thread).
+
+        Called from the capture loop when a person is detected during a
+        pending inspection. Does NOT block the capture loop / MJPEG stream.
+        """
+        try:
+            if self._roboflow_available and self._roboflow_client is not None:
+                compliant, ratio, label, annotated = _roboflow_inspect(
+                    self._roboflow_client, frame, worker_id
+                )
+            else:
+                compliant, ratio, label, annotated = _stub_inspect(frame, worker_id)
+        except Exception as e:
+            print(f"[VisionEngine] Pending inspection failed: {e}")
+            compliant, ratio, label, annotated = None, 0.0, "VISION_ERROR", frame.copy()
+
+        # Save snapshot
+        ts_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        filename = f"{device_id}_{worker_id}_{ts_str}.jpg"
+        snapshot_path = str(SNAPSHOT_DIR / filename)
+        cv2.imwrite(snapshot_path, annotated)
+
+        result = _make_result(
+            worker_id=worker_id,
+            device_id=device_id,
+            compliant=compliant,
+            compliance_ratio=ratio,
+            label=label,
+            snapshot_path=snapshot_path,
+        )
+
+        with self._pending_lock:
+            self._pending_inspection["status"] = "complete"
+            self._pending_inspection["result"] = result
+            self._pending_inspection["completed_at"] = (
+                datetime.now(timezone.utc).isoformat()
+            )
+            # Also stash for state accessors
+            self._last_helmet_result = {
+                "compliant": compliant,
+                "compliance_ratio": ratio,
+                "label": label,
+                "snapshot_path": snapshot_path,
+                "timestamp": result["timestamp"],
+            }
+
+    def start_inspection(self, worker_id: str, device_id: str) -> dict:
+        """Start an async helmet inspection.
+
+        Waits for a person to appear in the camera, freezes that frame, then
+        runs Roboflow. Returns immediately; poll get_inspection_status() for
+        the result. Used by the dashboard "Run Helmet Inspection" button.
+        """
+        with self._pending_lock:
+            # Cancel any existing pending inspection
+            self._pending_inspection = {
+                "worker_id": worker_id,
+                "device_id": device_id,
+                "status": "waiting_for_person",
+                "result": None,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        print(f"[VisionEngine] Inspection started for {worker_id} — waiting for person")
+        return {
+            "status": "started",
+            "worker_id": worker_id,
+            "device_id": device_id,
+        }
+
+    def get_inspection_status(self) -> dict:
+        """Return the current status of a pending inspection (for polling)."""
+        with self._pending_lock:
+            if self._pending_inspection is None:
+                return {"status": "idle"}
+            return dict(self._pending_inspection)
+
+    def cancel_inspection(self) -> dict:
+        """Cancel a pending inspection."""
+        with self._pending_lock:
+            if self._pending_inspection is None:
+                return {"status": "idle"}
+            self._pending_inspection = None
+        return {"status": "cancelled"}
 
 
 # ── Smoke test ────────────────────────────────────────────────────────────────
