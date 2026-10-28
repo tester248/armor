@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, StyleSheet } from 'react-native';
-import { Card, Text, Button, ActivityIndicator, Icon, Switch, Divider } from 'react-native-paper';
+import { Card, Text, Button, ActivityIndicator, Icon, Switch, Divider, Chip } from 'react-native-paper';
 import { api, DEFAULT_DEVICE_ID } from '../api';
 import { STATUS, SPACING } from '../theme';
 
@@ -8,13 +8,15 @@ export default function InterlockScreen() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [benchMode, setBenchMode] = useState(true);
+  const [debugMode, setDebugMode] = useState(false);
+  const [mqttMsgs, setMqttMsgs] = useState<any[]>([]);
 
   const send = async (command: 'LOCKOUT' | 'RESET') => {
     setBusy(true);
     setMsg(null);
     try {
       const res = await api.interlock(command, DEFAULT_DEVICE_ID);
-      setMsg(`${command} sent — motor ${command === 'LOCKOUT' ? 'locked' : 'running'}`);
+      setMsg(`${command} sent — motor ${command === 'LOCKOUT' ? 'LOCKED' : 'RUNNING'}`);
     } catch (e: any) {
       setMsg(`Error: ${e.message}`);
     } finally {
@@ -27,7 +29,7 @@ export default function InterlockScreen() {
     setMsg(null);
     try {
       const res = await api.breach(DEFAULT_DEVICE_ID, 'WORKER_EMP_402', '24:6F:28:AB:C1:02');
-      setMsg(`Breach posted — vision inspection triggered`);
+      setMsg(`Proximity breach triggered — vision inspection triggered`);
     } catch (e: any) {
       setMsg(`Error: ${e.message}`);
     } finally {
@@ -38,6 +40,22 @@ export default function InterlockScreen() {
   const toggleBenchMode = async (value: boolean) => {
     setBenchMode(value);
     setMsg(`Bench Test Mode: ${value ? 'ON — proximity lockouts suppressed' : 'OFF — full safety active'}`);
+  };
+
+  const toggleDebugMode = (value: boolean) => {
+    setDebugMode(value);
+    if (value) {
+      loadMqttDebug();
+    }
+  };
+
+  const loadMqttDebug = async () => {
+    try {
+      const res = await api.debugMqtt(10);
+      setMqttMsgs(res.messages || []);
+    } catch (e: any) {
+      setMsg(`Debug error: ${e.message}`);
+    }
   };
 
   return (
@@ -103,6 +121,41 @@ export default function InterlockScreen() {
         </Card.Content>
       </Card>
 
+      {/* Debug Mode (replaces Blynk debug) */}
+      <Card style={styles.card} mode="contained">
+        <Card.Title title="Debug Mode" left={(p) => <Icon {...p} source="bug-outline" />} />
+        <Card.Content>
+          <View style={styles.toggleRow}>
+            <Text style={{ fontSize: 15 }}>Debug Mode</Text>
+            <Switch
+              value={debugMode}
+              onValueChange={toggleDebugMode}
+              color={STATUS.INFO}
+            />
+          </View>
+          {debugMode && (
+            <>
+              <Divider style={{ marginVertical: SPACING.sm }} />
+              <Text style={{ fontSize: 13, color: STATUS.MUTED, marginBottom: SPACING.sm }}>
+                Recent MQTT Messages:
+              </Text>
+              {mqttMsgs.length === 0 ? (
+                <Text style={{ fontSize: 12, color: STATUS.MUTED, fontStyle: 'italic' }}>
+                  No MQTT messages yet.
+                </Text>
+              ) : (
+                mqttMsgs.slice(0, 10).map((m, i) => (
+                  <View key={i} style={styles.msgRow}>
+                    <Text style={styles.msgTopic}>{m.topic || 'unknown'}</Text>
+                    <Text style={styles.msgPayload}>{typeof m.payload === 'string' ? m.payload : JSON.stringify(m.payload)}</Text>
+                  </View>
+                ))
+              )}
+            </>
+          )}
+        </Card.Content>
+      </Card>
+
       {/* Info */}
       <Card style={styles.card} mode="outlined">
         <Card.Content>
@@ -122,4 +175,7 @@ const styles = StyleSheet.create({
   btn: { marginBottom: SPACING.sm },
   msg: { marginTop: SPACING.sm, fontSize: 12 },
   toggleRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: SPACING.sm },
+  msgRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 2, borderBottomWidth: 1, borderBottomColor: '#334155' },
+  msgTopic: { fontSize: 11, color: '#06b6d4', fontWeight: '600', flex: 1 },
+  msgPayload: { fontSize: 10, color: '#cbd5e1', flex: 2, fontFamily: 'monospace' },
 });
