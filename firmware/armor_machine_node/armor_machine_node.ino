@@ -431,8 +431,8 @@ void core1Task(void* pv) {
         snprintf(mqttStr, sizeof(mqttStr), "OFFLINE");
       }
 
-      Serial.printf("[TELEMETRY] Temp: %4.1f C | Bus: %5.2f V | Current: %5.1f mA | Motor: %-7s | Blynk: %-7s | MQTT: %-25s | Badge: %s\r\n",
-                    gTempC, gVoltageV, gCurrentMa,
+      Serial.printf("[TELEMETRY] Temp: %4.1f C | Bus: %5.2f V | Current: %5.1f mA | Vib: %4.2f | Motor: %-7s | Blynk: %-7s | MQTT: %-25s | Badge: %s\r\n",
+                    gTempC, gVoltageV, gCurrentMa, gRms,
                     motorRunning ? "RUNNING" : "STOPPED",
                     Blynk.connected() ? "ONLINE" : "OFFLINE",
                     mqttStr,
