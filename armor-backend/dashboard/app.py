@@ -13,7 +13,6 @@ Features:
   • Real-time Plotly charts for ADXL345 vibration, INA219 current/power, DS18B20 temp
   • Incident log table with interactive snapshot photo evidence inspector
   • Manual emergency lockout & safety recovery controls
-  • In-dashboard breach test simulator
 """
 from __future__ import annotations
 
@@ -479,65 +478,22 @@ with st.sidebar:
         st.error("● Gateway Offline")
         st.caption("Start backend in terminal:<br>`python -m uvicorn --app-dir armor-backend backend.main:app --port 8000`", unsafe_allow_html=True)
 
-    st.markdown("---")
     st.markdown(
         f"""
         <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
             {icon_svg('zap', color='#f59e0b', size=16)}
-            <span style="font-family:'Space Grotesk',sans-serif; font-size:0.95rem; font-weight:700; color:#ffffff;">Quick Simulation Triggers</span>
+            <span style="font-family:'Space Grotesk',sans-serif; font-size:0.95rem; font-weight:700; color:#ffffff;">ESP32 Machine Node</span>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
-    if st.button("Stream Live Telemetry (10 Samples)", icon=":material/sensors:", use_container_width=True, disabled=not backend_online):
-        import math, random
-        for i in range(10):
-            sine = math.sin((time.time() + i) * 0.5)
-            rms = max(0.02, 0.045 + 0.015 * sine + random.gauss(0, 0.005))
-            v_v = round(12.1 + random.uniform(-0.1, 0.1), 2)
-            c_ma = round(420.0 + 35.0 * sine + random.uniform(-10.0, 10.0), 1)
-            t_c = round(34.2 + random.uniform(-0.2, 0.2), 2)
-            payload = {
-                "device_id": device_id,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "motor_state": "RUNNING",
-                "vibration": {
-                    "accel_x": round(random.gauss(0, 0.02), 3),
-                    "accel_y": round(random.gauss(0, 0.03), 3),
-                    "accel_z": round(0.98 + random.gauss(0, 0.02), 3),
-                    "rms": round(rms, 4),
-                    "crest_factor": round(2.0 + random.uniform(-0.2, 0.3), 2),
-                },
-                "power": {
-                    "voltage_v": v_v,
-                    "current_ma": c_ma,
-                    "power_mw": round(v_v * c_ma, 2),
-                },
-                "temperature_c": t_c,
-            }
-            api_post("/api/v1/telemetry", json_data=payload)
-        st.toast("10 Live sensor telemetry packets ingested!", icon=":material/check_circle:")
-        time.sleep(0.3)
-        st.rerun()
-
-    if st.button("Simulate Proximity Breach (<1.5m)", icon=":material/directions_walk:", use_container_width=True, type="secondary", disabled=not backend_online):
-        code, resp = api_post(
-            "/api/v1/breach",
-            json_data={
-                "device_id": device_id,
-                "worker_id": "WORKER_EMP_402",
-                "badge_mac": "24:6F:28:AB:C1:02",
-                "distance_est_m": 1.2,
-                "rssi_smoothed": -60.5,
-            },
-        )
-        if code in (200, 202):
-            st.toast("Proximity breach event sent! Vision inspection triggered.", icon=":material/warning:")
-        else:
-            st.error(f"Failed to post breach: {resp}")
+    if backend_online:
+        st.caption("Telemetry arrives via MQTT from the ESP32. No simulation.")
+    else:
+        st.caption("Start backend to receive ESP32 telemetry.")
 
     st.markdown("---")
+
     st.markdown(
         f"""
         <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
@@ -566,7 +522,11 @@ if backend_online and refresh_rate > 0:
     st_autorefresh(interval=refresh_rate * 1000, key="armor_autorefresh")
 
 
-# ── Step 2: Fetch Data or Fallback to Safe Defaults ───────────────────────────
+# ── Step 2: Fetch Data (real telemetry only, no synthetic fallbacks) ──────────
+status_data: dict[str, Any] = {}
+samples: list[dict[str, Any]] = []
+incidents: list[dict[str, Any]] = []
+
 if backend_online:
     status_data = api_get(f"/api/v1/status/{device_id}") or {}
     telemetry_resp = api_get(f"/api/v1/telemetry/{device_id}", params={"limit": 60})
@@ -574,41 +534,66 @@ if backend_online:
     incidents_resp = api_get("/api/v1/incidents", params={"device_id": device_id, "limit": 20})
     incidents = incidents_resp.get("incidents", []) if incidents_resp else []
 
-    has_telemetry = (len(samples) > 0) or (status_data.get("current_rms") is not None)
-    motor_state = status_data.get("motor_state") or (samples[-1].get("motor_state") if samples else "IDLE")
-    interlock_active = bool(status_data.get("interlock_active", False))
-    proximity_breach = bool(status_data.get("proximity_breach_active", False))
-    active_worker = status_data.get("active_worker_id")
-    last_telemetry_at = status_data.get("last_telemetry_at")
+def _reading(value: Any, fallback: Any = None) -> float | None:
+    """Return a real sensor reading, or fallback, or None. Never invent a fallback."""
+    try:
+        if value is not None:
+            return float(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        if fallback is not None:
+            return float(fallback)
+    except (TypeError, ValueError):
+        pass
+    return None
 
-    if has_telemetry:
-        current_rms = float(status_data.get("current_rms") if status_data.get("current_rms") is not None else (samples[-1].get("rms") or 0.0))
-        current_voltage = float(status_data.get("current_voltage_v") if status_data.get("current_voltage_v") is not None else (samples[-1].get("voltage_v") or 12.0))
-        current_ma = float(status_data.get("current_ma") if status_data.get("current_ma") is not None else (samples[-1].get("current_ma") or 0.0))
-        current_temp = float(status_data.get("current_temp_c") if status_data.get("current_temp_c") is not None else (samples[-1].get("temperature_c") or 25.0))
-        power_w = round((current_voltage * current_ma) / 1000.0, 2)
-    else:
-        current_rms = 0.0
-        current_voltage = 0.0
-        current_ma = 0.0
-        current_temp = 0.0
-        power_w = 0.0
-else:
-    # Standby state when backend is offline
-    status_data = {}
-    samples = []
-    incidents = []
-    has_telemetry = False
-    motor_state = "OFFLINE"
-    interlock_active = False
-    proximity_breach = False
-    active_worker = None
-    current_rms = None
-    current_voltage = None
-    current_ma = None
-    current_temp = None
-    power_w = None
-    last_telemetry_at = None
+
+motor_state = status_data.get("motor_state") or (samples[-1].get("motor_state") if samples else "NO DATA")
+interlock_active = bool(status_data.get("interlock_active", False))
+proximity_breach = bool(status_data.get("proximity_breach_active", False))
+active_worker = status_data.get("active_worker_id")
+current_rms = _reading(status_data.get("current_rms"), samples[-1].get("rms") if samples else None)
+current_voltage = _reading(status_data.get("current_voltage_v"), samples[-1].get("voltage_v") if samples else None)
+current_ma = _reading(status_data.get("current_ma"), samples[-1].get("current_ma") if samples else None)
+current_temp = _reading(status_data.get("current_temp_c"), samples[-1].get("temperature_c") if samples else None)
+power_w = (
+    round((current_voltage * current_ma) / 1000.0, 2)
+    if current_voltage is not None and current_ma is not None
+    else None
+)
+peak_ma = max([float(s.get("current_ma") or 0.0) for s in samples] or [0.0]) if samples else (current_ma or 0.0)
+
+# A status snapshot is "live" only if telemetry arrived in the last 10 seconds.
+telemetry_stale = True
+_last_seen = status_data.get("last_telemetry_at")
+if not _last_seen and samples:
+    _last_seen = samples[-1].get("timestamp") or samples[-1].get("ts")
+if _last_seen:
+    try:
+        _raw = str(_last_seen).strip()
+        try:
+            _num = float(_raw)
+            if _num < 1e10:
+                _seen_dt = datetime.fromtimestamp(_num, tz=timezone.utc)
+            else:
+                _seen_dt = datetime.fromtimestamp(_num / 1000.0, tz=timezone.utc)
+        except ValueError:
+            _seen_dt = datetime.fromisoformat(_raw.replace("Z", "+00:00"))
+            if _seen_dt.tzinfo is None:
+                _seen_dt = _seen_dt.replace(tzinfo=timezone.utc)
+        telemetry_stale = (datetime.now(timezone.utc) - _seen_dt).total_seconds() > 10
+    except (TypeError, ValueError, OSError):
+        telemetry_stale = True
+
+if not backend_online:
+    motor_state = "NO DATA"
+
+rms_text = f"{current_rms:.3f}" if current_rms is not None else "--"
+ma_text = f"{current_ma:.1f}" if current_ma is not None else "--"
+volt_text = f"{current_voltage:.1f}" if current_voltage is not None else "--"
+power_text = f"{power_w:.2f}" if power_w is not None else "--"
+temp_text = f"{current_temp:.1f}" if current_temp is not None else "--"
 
 
 # ── Live Connection & System Status Bar ───────────────────────────────────────
@@ -620,12 +605,12 @@ gateway_class = "status-online" if backend_online else "status-offline"
 gateway_text = "GATEWAY: CONNECTED (127.0.0.1:8000)" if backend_online else "GATEWAY: OFFLINE (Port 8000)"
 
 mqtt_class = "status-online" if mqtt_connected else ("status-standby" if backend_online else "status-offline")
-mqtt_text = f"MQTT: CONNECTED ({mqtt_broker_str})" if mqtt_connected else (f"MQTT: STANDBY (HTTP Ingest Active)" if backend_online else "MQTT: OFFLINE")
+mqtt_text = f"MQTT: CONNECTED ({mqtt_broker_str})" if mqtt_connected else ("MQTT: STANDBY (HTTP Ingest Active)" if backend_online else "MQTT: OFFLINE")
 
 if not backend_online:
     telem_class = "status-offline"
     telem_text = "TELEMETRY: GATEWAY OFFLINE"
-elif has_telemetry:
+elif not telemetry_stale:
     telem_class = "status-active"
     telem_text = f"TELEMETRY: STREAMING ({telemetry_count} samples)"
 else:
@@ -667,7 +652,7 @@ if not backend_online:
                     {icon_svg('alert_triangle', color='#94a3b8', size=20)} FASTAPI GATEWAY OFFLINE (PORT 8000)
                 </span>
                 <span style="font-size: 0.85rem; color: #cbd5e1; margin-top: 4px; display: block;">
-                    Dashboard is in preview mode. Start backend: <code>powershell .\\start.ps1</code> or <code>python -m uvicorn --app-dir armor-backend backend.main:app --port 8000</code>
+                    Start the backend: <code>python -m uvicorn --app-dir armor-backend backend.main:app --port 8000</code>
                 </span>
             </div>
             <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; background: rgba(0,0,0,0.4); padding: 6px 12px; border-radius: 6px; border: 1px solid #94a3b8;">
@@ -686,7 +671,7 @@ elif interlock_active:
                     {icon_svg('siren', color='#ef4444', size=24)} EMERGENCY MOTOR LOCKOUT ACTIVE — SAFETY INTERLOCK ENGAGED
                 </span>
                 <span style="font-size: 0.85rem; color: #fecaca; margin-top: 4px; display: block;">
-                    Cell <b>{device_id}</b> power cut. L298N driver Enable pin (GPIO 14) pulled LOW. Worker: <b>{active_worker or 'UNKNOWN'}</b>.
+                    Cell <b>{device_id}</b> power cut. L298N driver Enable pin (GPIO 25) pulled LOW. Worker: <b>{active_worker or 'UNKNOWN'}</b>.
                 </span>
             </div>
             <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.9rem; background: rgba(0,0,0,0.5); padding: 6px 14px; border-radius: 6px; border: 1px solid #ef4444;">
@@ -710,6 +695,25 @@ elif proximity_breach:
             </div>
             <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; background: rgba(0,0,0,0.4); padding: 6px 12px; border-radius: 6px; border: 1px solid #f59e0b;">
                 DISTANCE: <b>&lt; 1.5 METERS</b>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+elif telemetry_stale:
+    st.markdown(
+        f"""
+        <div class="alert-banner-offline">
+            <div>
+                <span style="font-size: 1.1rem; font-weight: 700; color: #ffffff; display: flex; align-items: center; gap: 8px;">
+                    {icon_svg('alert_triangle', color='#94a3b8', size=20)} AWAITING LIVE TELEMETRY FROM ESP32
+                </span>
+                <span style="font-size: 0.85rem; color: #cbd5e1; margin-top: 4px; display: block;">
+                    No telemetry received in the last 10 seconds. Values below are the last known readings, not live data.
+                </span>
+            </div>
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; background: rgba(0,0,0,0.4); padding: 6px 12px; border-radius: 6px; border: 1px solid #94a3b8;">
+                LINK: <b>NO DATA</b>
             </div>
         </div>
         """,
@@ -773,122 +777,53 @@ with c1:
     )
 
 with c2:
-    if not backend_online:
-        st.markdown(
-            """
-            <div class="hud-card">
-                <div class="hud-title">ADXL345 Vibration RMS</div>
-                <div class="hud-value" style="color: #64748b;">-- <span style="font-size:1rem; font-weight:400; color:#64748b;">g</span></div>
-                <div class="hud-sub" style="color: #ef4444;">Gateway offline</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    elif not has_telemetry:
-        st.markdown(
-            """
-            <div class="hud-card">
-                <div class="hud-title">ADXL345 Vibration RMS</div>
-                <div class="hud-value" style="color: #38bdf8;">0.000 <span style="font-size:1rem; font-weight:400; color:#94a3b8;">g</span></div>
-                <div class="hud-sub" style="color: #f59e0b;">Awaiting sensor stream</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    else:
-        vibe_warn = current_rms > 0.15
-        hud_class = "hud-red" if vibe_warn else "hud-green"
-        vibe_sub = (
-            f'<span style="color:#ef4444; display:inline-flex; align-items:center; gap:4px;">'
-            f'{icon_svg("alert_triangle", color="#ef4444", size=13)} Vibration Warning (&gt;0.15g)</span>'
-            if vibe_warn else
-            f'<span style="color:#10b981; display:inline-flex; align-items:center; gap:4px;">'
-            f'{icon_svg("check_circle", color="#10b981", size=13)} Nominal baseline (&lt;0.10g)</span>'
-        )
-        st.markdown(
-            f"""
-            <div class="hud-card {hud_class}">
-                <div class="hud-title">ADXL345 Vibration RMS</div>
-                <div class="hud-value">{current_rms:.3f} <span style="font-size:1rem; font-weight:400; color:#94a3b8;">g</span></div>
-                <div class="hud-sub">{vibe_sub}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    vibe_warn = current_rms is not None and current_rms > 0.15
+    hud_class = "hud-red" if vibe_warn else "hud-green"
+    vibe_sub = (
+        f'<span style="color:#ef4444; display:inline-flex; align-items:center; gap:4px;">'
+        f'{icon_svg("alert_triangle", color="#ef4444", size=13)} Vibration Warning (&gt;0.15g)</span>'
+        if vibe_warn else
+        f'<span style="color:#10b981; display:inline-flex; align-items:center; gap:4px;">'
+        f'{icon_svg("check_circle", color="#10b981", size=13)} Nominal baseline (&lt;0.10g)</span>'
+    )
+    st.markdown(
+        f"""
+        <div class="hud-card {hud_class}">
+            <div class="hud-title">ADXL345 Vibration RMS</div>
+            <div class="hud-value">{rms_text} <span style="font-size:1rem; font-weight:400; color:#94a3b8;">g</span></div>
+            <div class="hud-sub">{vibe_sub}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 with c3:
-    if not backend_online:
-        st.markdown(
-            """
-            <div class="hud-card">
-                <div class="hud-title">INA219 Power Draw</div>
-                <div class="hud-value" style="color: #64748b;">-- <span style="font-size:1rem; font-weight:400; color:#64748b;">mA</span></div>
-                <div class="hud-sub" style="color: #ef4444;">Gateway offline</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    elif not has_telemetry:
-        st.markdown(
-            """
-            <div class="hud-card">
-                <div class="hud-title">INA219 Power Draw</div>
-                <div class="hud-value" style="color: #38bdf8;">0.0 <span style="font-size:1rem; font-weight:400; color:#94a3b8;">mA</span></div>
-                <div class="hud-sub" style="color: #f59e0b;">Awaiting sensor stream</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    else:
-        curr_warn = current_ma > 800.0
-        hud_class = "hud-amber" if curr_warn else ""
-        st.markdown(
-            f"""
-            <div class="hud-card {hud_class}">
-                <div class="hud-title">INA219 Power Draw</div>
-                <div class="hud-value">{current_ma:.1f} <span style="font-size:1rem; font-weight:400; color:#94a3b8;">mA</span></div>
-                <div class="hud-sub">Bus: {current_voltage:.1f}V | Power: {power_w:.2f}W</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    curr_warn = current_ma is not None and current_ma > 800.0
+    hud_class = "hud-amber" if curr_warn else ""
+    st.markdown(
+        f"""
+        <div class="hud-card {hud_class}">
+            <div class="hud-title">INA219 Power Draw</div>
+            <div class="hud-value">{ma_text} <span style="font-size:1rem; font-weight:400; color:#94a3b8;">mA</span></div>
+            <div class="hud-sub">Bus: {volt_text}V | Peak: {peak_ma:.1f}mA | Power: {power_text}W</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 with c4:
-    if not backend_online:
-        st.markdown(
-            """
-            <div class="hud-card">
-                <div class="hud-title">DS18B20 Surface Temp</div>
-                <div class="hud-value" style="color: #64748b;">-- <span style="font-size:1rem; font-weight:400; color:#64748b;">°C</span></div>
-                <div class="hud-sub" style="color: #ef4444;">Gateway offline</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    elif not has_telemetry:
-        st.markdown(
-            """
-            <div class="hud-card">
-                <div class="hud-title">DS18B20 Surface Temp</div>
-                <div class="hud-value" style="color: #38bdf8;">0.0 <span style="font-size:1rem; font-weight:400; color:#94a3b8;">°C</span></div>
-                <div class="hud-sub" style="color: #f59e0b;">Awaiting sensor stream</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    else:
-        temp_warn = current_temp > 55.0
-        hud_class = "hud-red" if temp_warn else ""
-        st.markdown(
-            f"""
-            <div class="hud-card {hud_class}">
-                <div class="hud-title">DS18B20 Surface Temp</div>
-                <div class="hud-value">{current_temp:.1f} <span style="font-size:1rem; font-weight:400; color:#94a3b8;">°C</span></div>
-                <div class="hud-sub">Thermal boundary: &lt;65.0°C</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    temp_warn = current_temp is not None and current_temp > 55.0
+    hud_class = "hud-red" if temp_warn else ""
+    st.markdown(
+        f"""
+        <div class="hud-card {hud_class}">
+            <div class="hud-title">DS18B20 Surface Temp</div>
+            <div class="hud-value">{temp_text} <span style="font-size:1rem; font-weight:400; color:#94a3b8;">°C</span></div>
+            <div class="hud-sub">Thermal boundary: &lt;65.0°C</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 st.markdown("<br>", unsafe_allow_html=True)
 
@@ -909,24 +844,48 @@ with left_col:
         """,
         unsafe_allow_html=True,
     )
+    view_mode = st.radio(
+        "View Mode",
+        options=["Live Camera", "3D Digital Twin"],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
 
     if backend_online:
-        stream_url = f"{API_BASE_URL}/video/stream"
-        st.markdown(
-            f"""
-            <div class="video-frame-container" style="height: 380px;">
-                <div class="live-badge">● LIVE AI STREAM</div>
-                <iframe 
-                    src="{stream_url}" 
-                    width="100%" 
-                    height="100%" 
-                    style="border:none; display:block; background:#000;"
-                    scrolling="no"
-                ></iframe>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        if view_mode == "Live Camera":
+            stream_url = f"{API_BASE_URL}/video/stream"
+            st.markdown(
+                f"""
+                <div class="video-frame-container" style="height: 380px;">
+                    <div class="live-badge">LIVE AI STREAM</div>
+                    <iframe
+                        src="{stream_url}"
+                        width="100%"
+                        height="100%"
+                        style="border:none; display:block; background:#000;"
+                        scrolling="no"
+                    ></iframe>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            twin_url = f"{API_BASE_URL}/twin?device_id={device_id}"
+            st.markdown(
+                f"""
+                <div class="video-frame-container" style="height: 380px;">
+                    <div class="live-badge" style="background:rgba(6,182,212,0.9);">3D DIGITAL TWIN</div>
+                    <iframe
+                        src="{twin_url}"
+                        width="100%"
+                        height="100%"
+                        style="border:none; display:block; background:#0b0f19;"
+                        scrolling="no"
+                    ></iframe>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
     else:
         st.markdown(
             f"""
@@ -934,14 +893,15 @@ with left_col:
                 <div style="margin-bottom: 12px; opacity: 0.7;">
                     {icon_svg('video', color='#94a3b8', size=44)}
                 </div>
-                <div style="font-weight: 700; font-size: 1.1rem; color: #ffffff;">Camera Stream Offline</div>
+                <div style="font-weight: 700; font-size: 1.1rem; color: #ffffff;">Stream Offline</div>
                 <div style="color: #94a3b8; font-size: 0.85rem; max-width: 380px; margin-top: 6px;">
-                    Start the FastAPI backend server on port 8000 to connect to the live 30fps webcam & helmet segmentation stream.
+                    Start the FastAPI backend on port 8000 to connect.
                 </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
+
 
     st.markdown("<br>", unsafe_allow_html=True)
     btn_col1, btn_col2 = st.columns(2)
@@ -1129,7 +1089,7 @@ with right_col:
 
     else:
         with chart_tab1:
-            st.info("Awaiting telemetry stream from ESP32 machine node. Run `python scripts/simulate_esp32.py` to stream live sensor readings.")
+            st.info("Awaiting telemetry stream from ESP32 machine node via MQTT.")
         with chart_tab2:
             st.info("Awaiting current & voltage readings from INA219.")
         with chart_tab3:

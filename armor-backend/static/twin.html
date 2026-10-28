@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>ARMOR 3D Digital Twin</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0b0f19; color: #f8fafc; font-family: 'Inter', sans-serif; overflow: hidden; }
+  #canvas-container { width: 100vw; height: 100vh; }
+  #overlay {
+    position: absolute; top: 12px; left: 12px; z-index: 10;
+    background: rgba(18, 26, 43, 0.85); border: 1px solid rgba(56, 189, 248, 0.3);
+    border-radius: 10px; padding: 12px 16px; backdrop-filter: blur(12px);
+    font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;
+  }
+  #overlay .title { color: #06b6d4; font-weight: 700; margin-bottom: 6px; font-size: 0.9rem; }
+  #overlay .row { display: flex; justify-content: space-between; gap: 16px; margin: 2px 0; }
+  #overlay .label { color: #94a3b8; }
+  #overlay .value { color: #ffffff; font-weight: 600; }
+  #status-bar {
+    position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 10;
+    background: rgba(18, 26, 43, 0.85); border: 1px solid rgba(56, 189, 248, 0.3);
+    border-radius: 8px; padding: 8px 20px; font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85rem; font-weight: 700; letter-spacing: 0.05em;
+  }
+  #live-badge {
+    position: absolute; top: 12px; right: 12px; z-index: 10;
+    background: rgba(239, 68, 68, 0.9); color: white; font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem; font-weight: 700; padding: 4px 10px; border-radius: 4px;
+    letter-spacing: 0.1em;
+  }
+  .connected { color: #10b981; }
+  .disconnected { color: #ef4444; }
+</style>
+</head>
+<body>
+<div id="canvas-container"></div>
+<div id="overlay">
+  <div class="title">ARMOR DIGITAL TWIN</div>
+  <div class="row"><span class="label">Motor State</span><span class="value" id="motorState">--</span></div>
+  <div class="row"><span class="label">Interlock</span><span class="value" id="interlock">--</span></div>
+  <div class="row"><span class="label">Proximity</span><span class="value" id="proximity">--</span></div>
+  <div class="row"><span class="label">Worker</span><span class="value" id="worker">--</span></div>
+  <div class="row"><span class="label">Vibration</span><span class="value" id="vib">--</span></div>
+  <div class="row"><span class="label">Temperature</span><span class="value" id="temp">--</span></div>
+  <div class="row"><span class="label">Current</span><span class="value" id="current">--</span></div>
+  <div class="row"><span class="label">WS</span><span class="value" id="wsStatus">connecting...</span></div>
+</div>
+<div id="live-badge">3D TWIN</div>
+<div id="status-bar" style="background:rgba(16,185,129,0.2);border-color:#10b981;color:#10b981;">SYSTEM NOMINAL</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ---- Scene setup ----
+const container = document.getElementById('canvas-container');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0f19);
+scene.fog = new THREE.Fog(0x0b0f19, 8, 20);
+
+const camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.1, 100);
+camera.position.set(4, 3, 5);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(container.clientWidth, container.clientHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+container.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.target.set(0, 0.5, 0);
+controls.minDistance = 2;
+controls.maxDistance = 12;
+
+// ---- Lighting ----
+const ambient = new THREE.AmbientLight(0x404060, 0.6);
+scene.add(ambient);
+const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+dirLight.position.set(5, 8, 5);
+dirLight.castShadow = true;
+dirLight.shadow.mapSize.set(1024, 1024);
+scene.add(dirLight);
+const accentLight = new THREE.PointLight(0x06b6d4, 0.8, 10);
+accentLight.position.set(-2, 2, 2);
+scene.add(accentLight);
+
+// ---- Grid floor ----
+const grid = new THREE.GridHelper(8, 16, 0x1e3a5f, 0x0f2040);
+grid.position.y = -0.5;
+scene.add(grid);
+
+// ---- Machine base (platform) ----
+const baseGeo = new THREE.BoxGeometry(2.4, 0.3, 1.6);
+const baseMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, metalness: 0.6, roughness: 0.4 });
+const base = new THREE.Mesh(baseGeo, baseMat);
+base.position.y = -0.35;
+base.receiveShadow = true;
+scene.add(base);
+
+// ---- Motor housing ----
+const motorGeo = new THREE.CylinderGeometry(0.4, 0.4, 1.0, 32);
+const motorMat = new THREE.MeshStandardMaterial({ color: 0x10b981, metalness: 0.5, roughness: 0.3, emissive: 0x000000 });
+const motor = new THREE.Mesh(motorGeo, motorMat);
+motor.position.y = 0.3;
+motor.castShadow = true;
+scene.add(motor);
+
+// ---- Motor shaft (rotates) ----
+const shaftGeo = new THREE.CylinderGeometry(0.08, 0.08, 0.6, 16);
+const shaftMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.8, roughness: 0.2 });
+const shaft = new THREE.Mesh(shaftGeo, shaftMat);
+shaft.position.y = 0.9;
+scene.add(shaft);
+
+// ---- Motor end cap ----
+const capGeo = new THREE.CylinderGeometry(0.42, 0.42, 0.1, 32);
+const capMat = new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.7, roughness: 0.3 });
+const cap = new THREE.Mesh(capGeo, capMat);
+cap.position.y = 0.85;
+scene.add(cap);
+
+// ---- Proximity ring (danger zone) ----
+const ringGeo = new THREE.TorusGeometry(1.6, 0.04, 8, 64);
+const ringMat = new THREE.MeshStandardMaterial({ color: 0x10b981, emissive: 0x000000, transparent: true, opacity: 0.6 });
+const ring = new THREE.Mesh(ringGeo, ringMat);
+ring.rotation.x = Math.PI / 2;
+ring.position.y = -0.1;
+scene.add(ring);
+
+// ---- Badge (worker) marker ----
+const badgeGeo = new THREE.SphereGeometry(0.12, 16, 16);
+const badgeMat = new THREE.MeshStandardMaterial({ color: 0xf59e0b, emissive: 0x332200 });
+const badge = new THREE.Mesh(badgeGeo, badgeMat);
+badge.position.set(2.0, 0.3, 0);
+badge.visible = false;
+scene.add(badge);
+
+// ---- State ----
+let motorState = 'RUNNING';
+let interlockActive = false;
+let proximityBreach = false;
+let activeWorker = null;
+let currentTemp = 34.0;
+let currentRms = 0.05;
+let shaftSpeed = 0.15;
+
+// ---- WebSocket connection ----
+const params = new URLSearchParams(window.location.search);
+const deviceId = params.get('device_id') || 'machino_node_01';
+const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+const wsHost = window.location.host || '127.0.0.1:8000';
+const wsUrl = `${wsProtocol}//${wsHost}/ws/live?device_id=${encodeURIComponent(deviceId)}`;
+
+const wsStatusEl = document.getElementById('wsStatus');
+let ws = null;
+let reconnectTimer = null;
+
+function connectWS() {
+  try {
+    ws = new WebSocket(wsUrl);
+    ws.onopen = () => {
+      wsStatusEl.textContent = 'connected';
+      wsStatusEl.className = 'value connected';
+      if (reconnectTimer) { clearInterval(reconnectTimer); reconnectTimer = null; }
+    };
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'snapshot') handleSnapshot(data);
+      } catch (e) { /* ignore */ }
+    };
+    ws.onclose = () => {
+      wsStatusEl.textContent = 'disconnected';
+      wsStatusEl.className = 'value disconnected';
+      if (!reconnectTimer) reconnectTimer = setInterval(connectWS, 3000);
+    };
+    ws.onerror = () => { ws.close(); };
+  } catch (e) {
+    wsStatusEl.textContent = 'error';
+    wsStatusEl.className = 'value disconnected';
+  }
+}
+connectWS();
+
+function handleSnapshot(d) {
+  motorState = d.motor_state || 'UNKNOWN';
+  interlockActive = !!d.interlock_active;
+  proximityBreach = !!d.proximity_breach_active;
+  activeWorker = d.active_worker_id || null;
+  currentTemp = d.current_temp_c || 34.0;
+  currentRms = d.current_rms || 0.05;
+
+  // Update overlay
+  document.getElementById('motorState').textContent = motorState;
+  document.getElementById('interlock').textContent = interlockActive ? 'ENGAGED' : 'CLEAR';
+  document.getElementById('proximity').textContent = proximityBreach ? 'BREACH' : 'CLEAR';
+  document.getElementById('worker').textContent = activeWorker || 'none';
+  document.getElementById('vib').textContent = currentRms.toFixed(3) + ' g';
+  document.getElementById('temp').textContent = currentTemp.toFixed(1) + ' C';
+  document.getElementById('current').textContent = (d.current_ma || 0).toFixed(0) + ' mA';
+
+  // Color motor based on state
+  let motorColor = 0x10b981; // green
+  if (interlockActive) motorColor = 0xef4444; // red
+  else if (proximityBreach) motorColor = 0xf59e0b; // amber
+  motor.material.color.setHex(motorColor);
+  motor.material.emissive.setHex(interlockActive ? 0x330000 : 0x000000);
+  shaft.material.color.setHex(interlockActive ? 0xef4444 : 0x94a3b8);
+  cap.material.color.setHex(interlockActive ? 0x7f1d1d : 0x334155);
+
+  // Ring color
+  let ringColor = 0x10b981;
+  if (proximityBreach) ringColor = 0xf59e0b;
+  if (interlockActive) ringColor = 0xef4444;
+  ring.material.color.setHex(ringColor);
+  ring.material.emissive.setHex(proximityBreach || interlockActive ? ringColor : 0x000000);
+  ring.material.opacity = (proximityBreach || interlockActive) ? 0.9 : 0.4;
+
+  // Badge visibility
+  badge.visible = !!activeWorker;
+  if (activeWorker) {
+    badge.material.color.setHex(proximityBreach ? 0xf59e0b : 0x10b981);
+  }
+
+  // Temperature -> motor emissive intensity (subtle heat glow)
+  const heat = Math.max(0, (currentTemp - 30) / 35);
+  motor.material.emissive.setRGB(heat * 0.3, 0, 0);
+
+  // Status bar
+  const statusBar = document.getElementById('status-bar');
+  if (interlockActive) {
+    statusBar.textContent = 'EMERGENCY LOCKOUT ACTIVE';
+    statusBar.style.background = 'rgba(239,68,68,0.2)';
+    statusBar.style.borderColor = '#ef4444';
+    statusBar.style.color = '#ef4444';
+  } else if (proximityBreach) {
+    statusBar.textContent = 'PROXIMITY BREACH DETECTED';
+    statusBar.style.background = 'rgba(245,158,11,0.2)';
+    statusBar.style.borderColor = '#f59e0b';
+    statusBar.style.color = '#f59e0b';
+  } else {
+    statusBar.textContent = 'SYSTEM NOMINAL';
+    statusBar.style.background = 'rgba(16,185,129,0.2)';
+    statusBar.style.borderColor = '#10b981';
+    statusBar.style.color = '#10b981';
+  }
+}
+
+// ---- Animation loop ----
+const clock = new THREE.Clock();
+function animate() {
+  requestAnimationFrame(animate);
+  const delta = clock.getDelta();
+
+  // Rotate shaft when running
+  if (motorState === 'RUNNING' && !interlockActive) {
+    shaft.rotation.y += shaftSpeed * (1 + currentRms * 5);
+    motor.rotation.y += shaftSpeed * 0.3;
+  }
+
+  // Pulse ring on breach
+  if (proximityBreach || interlockActive) {
+    const t = clock.getElapsedTime();
+    ring.scale.setScalar(1 + Math.sin(t * 4) * 0.03);
+  } else {
+    ring.scale.setScalar(1);
+  }
+
+  // Gentle badge orbit when active
+  if (badge.visible) {
+    const t = clock.getElapsedTime();
+    badge.position.x = 1.8 * Math.cos(t * 0.5);
+    badge.position.z = 1.8 * Math.sin(t * 0.5);
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+// ---- Resize handler ----
+window.addEventListener('resize', () => {
+  camera.aspect = container.clientWidth / container.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(container.clientWidth, container.clientHeight);
+});
+</script>
+</body>
+</html>

@@ -64,8 +64,8 @@ python -m uvicorn backend.main:app --reload --port 8000
 # Terminal 2: operator dashboard
 streamlit run dashboard/app.py --server.port 8501
 
-# Terminal 3: simulated ESP32 telemetry (optional)
-python scripts/simulate_esp32.py
+# Terminal 3: ESP32 machine node (flashed with laptop IP as MQTT broker)
+# python scripts/mqtt_debug.py   # monitor incoming MQTT data
 ```
 
 ## Tests

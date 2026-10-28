@@ -58,6 +58,13 @@ from backend.models import (
     InterlockCommand,
     WorkerBadge,
 )
+from backend.ml_engine import (
+    build_feature_matrix,
+    train_isolation_forest_distilled,
+    score_feature_vector,
+    latest_feature_vector,
+    FEATURE_ORDER,
+)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 MQTT_BROKER   = os.getenv("MQTT_BROKER", "localhost")
@@ -113,6 +120,47 @@ def _telegram_send(text: str, photo_path: str | None = None) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 _mqtt_client = None
 
+# Ring buffer of recent raw MQTT messages (for debug utility)
+_mqtt_ring: list[dict[str, Any]] = []
+_MQTT_RING_MAX = 200
+
+
+def _score_anomaly(device_id: str) -> None:
+    """Score recent telemetry for anomaly if a calibrated model exists."""
+    try:
+        package = store.get_model_package("machino_node_01", device_id)
+        if package is None:
+            return
+        recent = store.get_recent_samples_for_ml(device_id, limit=50)
+        fv = latest_feature_vector(recent, window_size=25)
+        if fv is None:
+            return
+        score = score_feature_vector(fv, package)
+        high = float(package.get("hysteresis_high", package.get("decision_threshold", 0.0)))
+        is_anom = score >= high
+        store.record_anomaly("machino_node_01", device_id, score, high, is_anom)
+        store.set_machine_state(device_id, {"is_anomaly": is_anom})
+    except Exception as e:
+        print(f"[ML] Anomaly scoring failed: {e}")
+
+
+def _telemetry_timestamp(value: Any) -> str:
+    """Normalise an incoming timestamp. ESP32 millis() is not a wall-clock time."""
+    if isinstance(value, (int, float)):
+        # Accept epoch milliseconds only; smaller numbers are uptime counters.
+        if value > 1_000_000_000_000:
+            return datetime.fromtimestamp(value / 1000.0, tz=timezone.utc).isoformat()
+        return _utc_now()
+    if isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.isoformat()
+        except ValueError:
+            return _utc_now()
+    return _utc_now()
+
 
 def _handle_telemetry_message(payload: dict[str, Any]) -> None:
     """Process incoming telemetry from machinocare/v1/devices/+/telemetry topic."""
@@ -121,8 +169,8 @@ def _handle_telemetry_message(payload: dict[str, Any]) -> None:
 
     record = {
         "device_id":    payload.get("device_id", "machino_node_01"),
-        "timestamp":    payload.get("timestamp", _utc_now()),
-        "motor_state":  payload.get("motor_state", "RUNNING"),
+        "timestamp":    _telemetry_timestamp(payload.get("timestamp")),
+        "motor_state":  payload.get("motor_state", "UNKNOWN"),
         "accel_x":      vib.get("accel_x"),
         "accel_y":      vib.get("accel_y"),
         "accel_z":      vib.get("accel_z"),
@@ -134,6 +182,7 @@ def _handle_telemetry_message(payload: dict[str, Any]) -> None:
         "temperature_c": payload.get("temperature_c"),
     }
     store.insert_telemetry(record)
+    _score_anomaly(record["device_id"])
 
 
 def _handle_breach_message(payload: dict[str, Any]) -> None:
@@ -163,6 +212,19 @@ def _handle_breach_message(payload: dict[str, Any]) -> None:
     result = vision_engine.inspect(worker_id=worker_id, device_id=device_id)
     compliant = result["compliant"]
     snapshot  = result.get("snapshot_path")
+
+    if compliant is None:
+        # Vision unavailable (no Roboflow credentials / no model).
+        # Do NOT invent a verdict and do NOT lock the machine on a guess.
+        print(
+            f"[Vision] Inspection unavailable for {worker_id} "
+            f"({result.get('label')}); interlock decision skipped."
+        )
+        store.set_machine_state(device_id, {
+            "proximity_breach_active": True,
+            "active_worker_id": worker_id,
+        })
+        return
 
     if not compliant:
         # 4a. Helmet violation → LOCKOUT pipeline
@@ -246,7 +308,16 @@ def _start_mqtt() -> None:
             try:
                 payload = json.loads(msg.payload.decode())
             except Exception:
-                return
+                payload = {"_raw": msg.payload.decode(errors="replace")}
+
+            # Capture into debug ring buffer
+            _mqtt_ring.append({
+                "topic": msg.topic,
+                "payload": payload,
+                "received_at": _utc_now(),
+            })
+            if len(_mqtt_ring) > _MQTT_RING_MAX:
+                del _mqtt_ring[: len(_mqtt_ring) - _MQTT_RING_MAX]
 
             topic = msg.topic
             if topic.endswith("/telemetry"):
@@ -317,6 +388,19 @@ def video_stream():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 3D Digital Twin (embedded in Streamlit via <iframe>)
+# ----------------------------------------------------------------------------
+@app.get("/twin", tags=["Vision"])
+def digital_twin():
+    """Serve the Three.js digital twin page. Connects to /ws/live via WebSocket."""
+    twin_path = Path(__file__).resolve().parent.parent / "static" / "twin.html"
+    if not twin_path.exists():
+        raise HTTPException(status_code=404, detail="twin.html not found")
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(content=twin_path.read_text(encoding="utf-8"))
+
+
+
 # Health
 # ══════════════════════════════════════════════════════════════════════════════
 @app.get("/api/v1/health", tags=["System"])
@@ -332,6 +416,17 @@ def health():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ============================================================================
+# Debug: recent raw MQTT messages (ring buffer)
+# ============================================================================
+@app.get("/api/v1/debug/mqtt", tags=["Debug"])
+def debug_mqtt(limit: int = Query(default=50, ge=1, le=200)):
+    """Return the most recent raw MQTT messages received from the ESP."""
+    recent = _mqtt_ring[-limit:]
+    return {"count": len(recent), "messages": recent}
+
+
+
 # Telemetry  (HTTP fallback — ESP32 can also POST directly if MQTT unavailable)
 # ══════════════════════════════════════════════════════════════════════════════
 @app.post("/api/v1/telemetry", status_code=202, tags=["Telemetry"])
@@ -358,6 +453,25 @@ def ingest_telemetry(payload: TelemetryIngestRequest):
         "temperature_c": payload.temperature_c,
     }
     store.insert_telemetry(record)
+
+    # Predictive maintenance: score anomaly if a calibrated model exists
+    try:
+        package = store.get_model_package("machino_node_01", payload.device_id)
+        if package is not None:
+            recent = store.get_recent_samples_for_ml(payload.device_id, limit=50)
+            fv = latest_feature_vector(recent, window_size=25)
+            if fv is not None:
+                score = score_feature_vector(fv, package)
+                high = float(package.get("hysteresis_high", package.get("decision_threshold", 0.0)))
+                low = float(package.get("hysteresis_low", high))
+                is_anom = score >= high
+                store.record_anomaly("machino_node_01", payload.device_id, score, high, is_anom)
+                store.set_machine_state(payload.device_id, {
+                    "is_anomaly": is_anom,
+                })
+    except Exception as e:
+        print(f"[ML] Anomaly scoring failed: {e}")
+
     return {"status": "accepted", "device_id": payload.device_id, "timestamp": _utc_now()}
 
 
@@ -545,6 +659,77 @@ def deactivate_worker(badge_mac: str):
         raise HTTPException(status_code=404, detail=f"Badge '{badge_mac}' not found.")
     store.upsert_worker_badge({**badge, "active": False})
     return {"status": "deactivated", "badge_mac": badge_mac}
+
+
+# ============================================================================
+# Calibration & Model (Predictive Maintenance / MachinoCare 1.0 ML)
+# ============================================================================
+@app.post("/api/v1/calibrate", tags=["Calibration"])
+def calibrate(device_id: str = Query(default="machino_node_01"), contamination: float = Query(default=0.05, ge=0.01, le=0.4)):
+    """Run calibration on recent telemetry samples. Trains an IsolationForest-distilled model."""
+    samples = store.get_recent_samples_for_ml(device_id, limit=500)
+    if len(samples) < 20:
+        raise HTTPException(status_code=400, detail="Need at least 20 telemetry samples for calibration.")
+
+    import numpy as np
+    feature_matrix = build_feature_matrix(samples, window_size=25)
+    if feature_matrix.shape[0] < 8:
+        raise HTTPException(status_code=400, detail="Not enough windows for calibration.")
+
+    package = train_isolation_forest_distilled(feature_matrix, contamination=contamination)
+
+    acc_vals = [s["acc_mag"] for s in samples]
+    baseline = {
+        "mean_acc": float(np.mean(acc_vals)) if acc_vals else 0.0,
+        "std_acc": float(np.std(acc_vals)) if acc_vals else 0.0,
+        "sample_count": len(samples),
+    }
+
+    store.save_model_package(
+        machine_id="machino_node_01",
+        device_id=device_id,
+        package=package,
+        baseline_stats=baseline,
+        quality=package.get("quality_correlation"),
+        window_count=package.get("window_count"),
+    )
+
+    return {
+        "status": "completed",
+        "device_id": device_id,
+        "window_count": package.get("window_count"),
+        "quality": package.get("quality_correlation"),
+        "model_package": package,
+    }
+
+
+@app.get("/api/v1/model/{machine_id}/{device_id}", tags=["Calibration"])
+def get_model(machine_id: str, device_id: str):
+    """Retrieve the latest model package for a device (used by ESP32 firmware)."""
+    package = store.get_model_package(machine_id, device_id)
+    if package is None:
+        raise HTTPException(status_code=404, detail="No model package found.")
+    return {"machine_id": machine_id, "device_id": device_id, "model_package": package}
+
+
+@app.get("/api/v1/model/{device_id}", tags=["Calibration"])
+def get_model_simple(device_id: str):
+    """Simplified model retrieval (single machine)."""
+    package = store.get_model_package("machino_node_01", device_id)
+    if package is None:
+        raise HTTPException(status_code=404, detail="No model package found.")
+    return {"device_id": device_id, "model_package": package}
+
+
+@app.get("/api/v1/anomalies", tags=["Calibration"])
+def list_anomalies(
+    device_id: str = Query(default="machino_node_01"),
+    hours: int = Query(default=24, ge=1, le=168),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    """List recent anomaly events."""
+    anomalies = store.get_recent_anomalies("machino_node_01", device_id, hours=hours, limit=limit)
+    return {"count": len(anomalies), "anomalies": anomalies}
 
 
 # ══════════════════════════════════════════════════════════════════════════════

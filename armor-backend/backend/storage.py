@@ -137,6 +137,35 @@ class ArmorStore:
                     ts          TEXT    NOT NULL,
                     created_at  TEXT    DEFAULT CURRENT_TIMESTAMP
                 );
+
+                -- ML calibration results and model packages
+                CREATE TABLE IF NOT EXISTS calibrations (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    machine_id      TEXT    NOT NULL,
+                    device_id       TEXT    NOT NULL,
+                    model_package   TEXT    NOT NULL,
+                    baseline_stats  TEXT,
+                    quality         REAL,
+                    window_count    INTEGER,
+                    created_at      TEXT    DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_cal_machine_device
+                    ON calibrations (machine_id, device_id, created_at DESC);
+
+                -- Anomaly event log
+                CREATE TABLE IF NOT EXISTS anomaly_log (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    machine_id  TEXT    NOT NULL,
+                    device_id   TEXT    NOT NULL,
+                    score       REAL,
+                    threshold   REAL,
+                    is_anomaly  INTEGER DEFAULT 0,
+                    created_at  TEXT    DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_anomaly_machine_device
+                    ON anomaly_log (machine_id, device_id, created_at DESC);
                 """
             )
             self._conn.commit()
@@ -169,7 +198,7 @@ class ArmorStore:
                 (
                     data.get("device_id", "unknown"),
                     data.get("timestamp", _utc_now()),
-                    data.get("motor_state", "RUNNING"),
+                    data.get("motor_state", "UNKNOWN"),
                     data.get("accel_x"),
                     data.get("accel_y"),
                     data.get("accel_z"),
@@ -199,7 +228,7 @@ class ArmorStore:
                 """,
                 (
                     data.get("device_id", "unknown"),
-                    data.get("motor_state", "RUNNING"),
+                    data.get("motor_state", "UNKNOWN"),
                     data.get("timestamp", _utc_now()),
                     data.get("rms"),
                     data.get("voltage_v"),
@@ -226,6 +255,36 @@ class ArmorStore:
                 (device_id, limit),
             ).fetchall()
         return list(reversed(self._rows_to_list(rows)))
+
+    def get_recent_samples_for_ml(
+        self, device_id: str, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        """Map telemetry rows to the feature keys expected by ml_engine.
+
+        ARMOR uses an ADXL345 (accelerometer only), so the gyro fields from
+        MachinoCare 1.0 are reported as zero. The acceleration magnitude is
+        derived from the 3 axes when available, otherwise the measured RMS.
+        """
+        rows = self.get_recent_telemetry(device_id, limit=limit)
+        samples: list[dict[str, Any]] = []
+        for row in rows:
+            ax = row.get("accel_x")
+            ay = row.get("accel_y")
+            az = row.get("accel_z")
+            if ax is not None and ay is not None and az is not None:
+                acc_mag = (float(ax) ** 2 + float(ay) ** 2 + float(az) ** 2) ** 0.5
+            else:
+                acc_mag = float(row.get("rms") or 0.0)
+            samples.append(
+                {
+                    "acc_mag": acc_mag,
+                    "gyro_mag": 0.0,
+                    "gx": 0.0,
+                    "gy": 0.0,
+                    "gz": 0.0,
+                }
+            )
+        return samples
 
     # ------------------------------------------------------------------ #
     # Machine State
