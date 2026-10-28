@@ -424,6 +424,18 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
     if (Blynk.connected()) {
       Blynk.virtualWrite(V0, 0);
     }
+  } else if (strcmp(cmd, "BENCH_ON") == 0) {
+    benchTestMode = true;
+    Serial.println("[BENCH] Test mode ENABLED via MQTT (proximity lockouts suppressed).");
+    if (Blynk.connected()) {
+      Blynk.virtualWrite(V5, 1);
+    }
+  } else if (strcmp(cmd, "BENCH_OFF") == 0) {
+    benchTestMode = false;
+    Serial.println("[BENCH] Test mode DISABLED via MQTT (live safety interlocks active).");
+    if (Blynk.connected()) {
+      Blynk.virtualWrite(V5, 0);
+    }
   }
 }
 
