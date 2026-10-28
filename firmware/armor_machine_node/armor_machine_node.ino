@@ -269,11 +269,12 @@ bool fetchModelFromBackend() {
 
 // Compute anomaly score for one feature window using the distilled Ridge model.
 // Mirrors backend/ml_engine.py: score = dot(weights, z) + bias where z = (x - means) / stds.
-void computeAnomalyScore(float acc_mag, float &score, bool &is_anomaly) {
-  score = 0.0f;
-  is_anomaly = false;
-
-  if (!gModelLoaded) return;
+void computeAnomalyScore(float acc_mag, volatile float &score, volatile bool &is_anomaly) {
+  if (!gModelLoaded) {
+    score = 0.0f;
+    is_anomaly = false;
+    return;
+  }
 
   // Add new sample to circular buffer
   gAccMagWindow[gAccMagIdx] = acc_mag;
@@ -281,7 +282,11 @@ void computeAnomalyScore(float acc_mag, float &score, bool &is_anomaly) {
   if (gAccMagCount < ANOMALY_WINDOW) gAccMagCount++;
 
   // Need a full window to compute meaningful features
-  if (gAccMagCount < ANOMALY_WINDOW) return;
+  if (gAccMagCount < ANOMALY_WINDOW) {
+    score = 0.0f;
+    is_anomaly = false;
+    return;
+  }
 
   // Build 8-element feature vector (mirrors backend ml_engine.py FEATURE_ORDER)
   float features[FEATURE_DIM];
@@ -314,18 +319,20 @@ void computeAnomalyScore(float acc_mag, float &score, bool &is_anomaly) {
   features[7] = 0.0f;  // axis_imbalance_ratio
 
   // Normalize and compute score
+  float s = 0.0f;
   for (int i = 0; i < FEATURE_DIM; i++) {
     float std_i = gModelFeatureStds[i];
     if (std_i < 1e-6f) std_i = 1.0f;
     float z = (features[i] - gModelFeatureMeans[i]) / std_i;
-    score += gModelWeights[i] * z;
+    s += gModelWeights[i] * z;
   }
-  score += gModelBias;
+  s += gModelBias;
+  score = s;
 
   // Hysteresis: only flip state if clearly above/below thresholds
-  if (score >= gModelThresholdHigh) {
+  if (s >= gModelThresholdHigh) {
     is_anomaly = true;
-  } else if (score < gModelThresholdLow) {
+  } else if (s < gModelThresholdLow) {
     is_anomaly = false;
   } else {
     // In hysteresis band: keep previous state
@@ -440,13 +447,23 @@ void ensureMqtt() {
   }
 }
 
-// ---------- ESP-NOW (Wearable Badge Beacon) ----------
+// ---------- ESP-NOW (Wearable Badge Beacon & Feedback) ----------
+// Target Wearable Badge Hardware MAC Address (A0:B7:65:1E:2F:54)
+uint8_t targetBadgeMac[] = {0xA0, 0xB7, 0x65, 0x1E, 0x2F, 0x54};
+
 typedef struct {
   uint8_t  sender_mac[6];
   char     badge_id[32];
   uint32_t sequence_num;
   float    battery_voltage;
 } BadgeBeacon;
+
+typedef struct {
+  char    badge_id[32];
+  int8_t  node_rssi;
+  uint8_t zone;       // 0 = Out of Range, 1 = Safe Demo Zone, 2 = Danger / Breach
+  bool    interlock;
+} NodeFeedback;
 
 void onEspNowRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
   if (len < (int)sizeof(BadgeBeacon)) return;
@@ -569,6 +586,15 @@ void core1Task(void* pv) {
   if (esp_now_init() == ESP_OK) {
     esp_now_register_recv_cb(onEspNowRecv);
     Serial.println("[ESP-NOW] Initialized successfully");
+
+    // Register Target Badge peer for two-way range feedback
+    esp_now_peer_info_t peerBadge = {};
+    memcpy(peerBadge.peer_addr, targetBadgeMac, 6);
+    peerBadge.channel = 0;
+    peerBadge.encrypt = false;
+    if (esp_now_add_peer(&peerBadge) == ESP_OK) {
+      Serial.println("[ESP-NOW] Target Badge peer registered OK");
+    }
   } else {
     Serial.println("[ESP-NOW] Init FAILED");
   }
@@ -647,7 +673,7 @@ void core1Task(void* pv) {
         Blynk.virtualWrite(V2, gCurrentMa);
         Blynk.virtualWrite(V3, gTempC);
         Blynk.virtualWrite(V4, gRms);
-        Blynk.virtualWrite(V5, gAnomalyScore);
+        Blynk.virtualWrite(V7, gAnomalyScore);
         Blynk.virtualWrite(V6, gIsAnomaly ? 1 : 0);
       }
 
@@ -698,13 +724,14 @@ void core1Task(void* pv) {
       }
     }
 
-    // 10 Hz Proximity Breach Check (edge-triggered, repeat every 10 s while inside)
+    // 10 Hz Proximity Breach Check & Wearable Badge Feedback
     if (now - lastBreachCheck >= 100) {
       lastBreachCheck = now;
 
+      bool inside = false;
       if (gEmaInit) {
-        bool inside = breachLatched ? (gEmaRssi > RSSI_EXIT)
-                                    : (gEmaRssi > RSSI_ENTER);
+        inside = breachLatched ? (gEmaRssi > RSSI_EXIT)
+                               : (gEmaRssi > RSSI_ENTER);
 
         if (!inside) {
           breachLatched = false;
@@ -754,6 +781,36 @@ void core1Task(void* pv) {
             }
           }
         }
+      }
+
+      // Transmit 2-way Range Feedback to Badge so its LED and buzzer react
+      bool badgeActive = gBadgeSeen && (now - gBadgeLastTime < 2500);
+      if (badgeActive) {
+        uint8_t currentZone = 0;
+        if (inside) {
+          currentZone = 2; // Zone 2: Danger / Breach (< 1.2 m, RSSI > -52 dBm)
+        } else if (gEmaRssi >= RSSI_MAX_RANGE) {
+          currentZone = 1; // Zone 1: Safe Demo Zone (1.3 m - 3.4 m, -53 to -65 dBm)
+        } else {
+          currentZone = 0; // Zone 0: Out of Demo Range (> 3.5 m, RSSI < -65 dBm)
+        }
+
+        NodeFeedback fb;
+        memset(&fb, 0, sizeof(fb));
+        strncpy(fb.badge_id, gBadgeId, sizeof(fb.badge_id) - 1);
+        fb.node_rssi = (int8_t)roundf(gEmaRssi);
+        fb.zone      = currentZone;
+        fb.interlock = gInterlock;
+
+        // Ensure peer is registered
+        if (!esp_now_is_peer_exist(gBadgeMac)) {
+          esp_now_peer_info_t peerB = {};
+          memcpy(peerB.peer_addr, gBadgeMac, 6);
+          peerB.channel = 0;
+          peerB.encrypt = false;
+          esp_now_add_peer(&peerB);
+        }
+        esp_now_send(gBadgeMac, (uint8_t*)&fb, sizeof(fb));
       }
     }
 
