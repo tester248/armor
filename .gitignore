@@ -1,0 +1,31 @@
+# Excluded repos per instruction
+MachinoCare/
+machinocare-iot-predictive-maintenance/
+
+# Excluded docs per instruction
+ARMOR_24Hour_Work_Division_and_Roadmap.md
+ARMOR_System_Architecture_and_Implementation_Plan.md
+
+# Python caches and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment configs (never commit secrets)
+.env
+*.env
+!.env.example
+
+# Runtime SQLite database and snapshots
+data/
+**/data/
+*.db
+*.sqlite3
+*.jpg
+*.jpeg
+*.png
