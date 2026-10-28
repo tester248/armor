@@ -27,13 +27,6 @@
 #include <ArduinoJson.h>
 #include <time.h>
 
-// ==============================================================================
-// BENCH TEST MODE:
-// Set to true while testing both ESPs on your desk to prevent emergency lockouts.
-// Set to false for actual live deployment / presentation demo.
-// ==============================================================================
-#define BENCH_TEST_MODE           true
-
 // ---------- WiFi & MQTT Config ----------
 // MQTT_BROKER must be the laptop running the ARMOR FastAPI backend.
 // Reserve a static DHCP lease for that laptop so this address does not drift.
@@ -90,6 +83,7 @@ volatile float gTempC        = 0.0f;
 
 // Motor state & dual control (Blynk App + Safety Lockout)
 volatile bool blynkMotorRequested = false; // User command from Blynk Switch (V0)
+volatile bool benchTestMode       = true;  // Desk bench test mode: toggle via Blynk Switch (V5) (Default: true)
 volatile bool gInterlock          = false; // Safety lock (MQTT or proximity breach)
 volatile bool motorRunning        = false; // Physical motor output state
 
@@ -223,9 +217,17 @@ BLYNK_WRITE(V0) {
   Serial.printf("[BLYNK] Remote Switch V0: %s\r\n", blynkMotorRequested ? "POWER ON" : "POWER OFF");
 }
 
+BLYNK_WRITE(V5) {
+  int val = param.asInt();
+  benchTestMode = (val == 1);
+  Serial.printf("[BLYNK] Bench Test Mode (V5): %s\r\n",
+                benchTestMode ? "ENABLED (Proximity Lockouts Suppressed)" : "DISABLED (Live Safety Interlocks Active)");
+}
+
 BLYNK_CONNECTED() {
-  Serial.println("[BLYNK] Connected to Blynk Cloud! Syncing V0 state...");
+  Serial.println("[BLYNK] Connected to Blynk Cloud! Syncing V0 and V5 states...");
   Blynk.syncVirtual(V0);
+  Blynk.syncVirtual(V5);
 }
 
 // ---------- MQTT Callbacks ----------
@@ -438,11 +440,12 @@ void core1Task(void* pv) {
         snprintf(mqttStr, sizeof(mqttStr), "OFFLINE");
       }
 
-      Serial.printf("[TELEMETRY] Temp: %4.1f C | Bus: %5.2f V | Current: %5.1f mA | Vib: %4.2f | Motor: %-7s | Blynk: %-7s | MQTT: %-25s | Badge: %s\r\n",
-                    gTempC, gVoltageV, gCurrentMa, gRms,
+      Serial.printf("[TELEMETRY] Temp: %4.1f C | Bus: %5.2f V | Current: %5.1f mA | Motor: %-7s | Blynk: %-7s | MQTT: %-9s | Bench: %-3s | Badge: %s\r\n",
+                    gTempC, gVoltageV, gCurrentMa,
                     motorRunning ? "RUNNING" : "STOPPED",
                     Blynk.connected() ? "ONLINE" : "OFFLINE",
-                    mqttStr,
+                    mqtt.connected() ? "CONNECTED" : "OFFLINE",
+                    benchTestMode ? "ON" : "OFF",
                     badgeStr);
 
       // Push Live Telemetry to Blynk Virtual Pins
@@ -524,14 +527,14 @@ void core1Task(void* pv) {
             }
             char buf[512];
             serializeJson(doc, buf);
-#if !BENCH_TEST_MODE
-            mqtt.publish("machinocare/v1/events/proximity", buf, false);
-            Serial.printf("[SAFETY] Badge %s (%s) at %.2f m (RSSI %.1f) -> LOCKOUT SENT\r\n",
-                          badgeId, macStr, distance, gEmaRssi);
-#else
-            Serial.printf("[BENCH TEST] Badge breach detected: %s at %.2f m (RSSI %.1f) [Lockout suppressed]\r\n",
-                          badgeId, distance, gEmaRssi);
-#endif
+            if (!benchTestMode) {
+              mqtt.publish("machinocare/v1/events/proximity", buf, false);
+              Serial.printf("[SAFETY] Badge %s (%s) at %.2f m (RSSI %.1f) -> LOCKOUT SENT\r\n",
+                            badgeId, macStr, distance, gEmaRssi);
+            } else {
+              Serial.printf("[BENCH TEST] Badge breach detected: %s at %.2f m (RSSI %.1f) [Lockout suppressed by Blynk V5]\r\n",
+                            badgeId, distance, gEmaRssi);
+            }
           }
         }
       }
@@ -547,9 +550,7 @@ void setup() {
   delay(1000);
   Serial.println("\r\n=======================================================");
   Serial.println("  ARMOR - Machine Node + Blynk IoT Remote Actuation    ");
-#if BENCH_TEST_MODE
-  Serial.println("  *** BENCH TEST MODE: Proximity Lockouts SUPPRESSED ***");
-#endif
+  Serial.println("  Blynk Controls: V0 = Motor Switch | V5 = Bench Mode  ");
   Serial.println("=======================================================");
 
   // Relay Pins (Safe initialization: start OFF)
