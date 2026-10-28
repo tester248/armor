@@ -1,0 +1,81 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Compile Machine Node",
+      "type": "shell",
+      "command": "arduino-cli compile --fqbn esp32:esp32:esp32 firmware/armor_machine_node",
+      "group": "build",
+      "options": {
+        "statusbar": {
+          "label": "$(check) Compile",
+          "color": "#89D185",
+          "detail": "Compile Machine Node Firmware"
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Compile Badge",
+      "type": "shell",
+      "command": "arduino-cli compile --fqbn esp32:esp32:esp32 firmware/armor_badge",
+      "group": "build",
+      "options": {
+        "statusbar": {
+          "label": "$(check) Compile Badge",
+          "color": "#89D185",
+          "detail": "Compile Wearable Badge Firmware"
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Upload Machine Node",
+      "type": "shell",
+      "command": "PORT=$(ls /dev/cu.usbserial-* /dev/cu.SLAB_USBtoUART 2>/dev/null | head -n 1); if [ -z \"$PORT\" ]; then echo \"No ESP32 board found!\"; exit 1; fi; echo \"Uploading to $PORT...\"; arduino-cli upload -p \"$PORT\" --fqbn esp32:esp32:esp32 firmware/armor_machine_node",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "options": {
+        "statusbar": {
+          "label": "$(arrow-right) Upload (Node)",
+          "color": "#4EC9B0",
+          "detail": "Upload Machine Node to ESP32"
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Upload Badge",
+      "type": "shell",
+      "command": "PORT=$(ls /dev/cu.usbserial-* /dev/cu.SLAB_USBtoUART 2>/dev/null | head -n 1); if [ -z \"$PORT\" ]; then echo \"No ESP32 board found!\"; exit 1; fi; echo \"Uploading to $PORT...\"; arduino-cli upload -p \"$PORT\" --fqbn esp32:esp32:esp32 firmware/armor_badge",
+      "group": "build",
+      "options": {
+        "statusbar": {
+          "label": "$(arrow-right) Upload (Badge)",
+          "color": "#9CDCFE",
+          "detail": "Upload Badge to ESP32"
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Serial Monitor",
+      "type": "shell",
+      "command": "PORT=$(ls /dev/cu.usbserial-* /dev/cu.SLAB_USBtoUART 2>/dev/null | head -n 1); if [ -z \"$PORT\" ]; then echo \"No ESP32 board found!\"; exit 1; fi; echo \"Connecting to $PORT at 115200 baud (Press Ctrl+C to stop)...\"; arduino-cli monitor -p \"$PORT\" -c baudrate=115200",
+      "options": {
+        "statusbar": {
+          "label": "$(plug) Monitor",
+          "color": "#CE9178",
+          "detail": "Open Serial Monitor (115200 baud)"
+        }
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "focus": true,
+        "panel": "new"
+      }
+    }
+  ]
+}
