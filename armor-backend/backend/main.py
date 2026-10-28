@@ -129,6 +129,10 @@ _mqtt_client = None
 _mqtt_ring: list[dict[str, Any]] = []
 _MQTT_RING_MAX = 200
 
+# Bench test mode per device. Mirrors firmware ``benchTestMode`` (default ON,
+# matching the firmware's safe desk-test default).
+_bench_mode: dict[str, bool] = {}
+
 
 def _load_model_package(device_id: str) -> dict[str, Any] | None:
     """Return the trained package dict for a device.
@@ -996,6 +1000,39 @@ def issue_interlock(payload: InterlockCommand, device_id: str = Query(default="m
     }
 
 
+@app.post("/api/v1/bench", tags=["Safety"])
+def set_bench_mode(
+    enabled: bool = Query(..., description="true = bench test mode ON"),
+    device_id: str = Query(default="machino_node_01"),
+):
+    """
+    Toggle bench test mode on the machine node without Blynk.
+
+    Bench mode suppresses ESP-NOW proximity lockouts while an engineer is
+    calibrating the rig. It is published on the same interlock topic the
+    firmware already subscribes to, so no extra subscription is required.
+    """
+    command = "BENCH_ON" if enabled else "BENCH_OFF"
+    payload = {
+        "command": command,
+        "device_id": device_id,
+        "source": "MOBILE_APP",
+        "reason": "Operator toggled bench mode from mobile app",
+        "issued_by": "mobile_app",
+    }
+    _bench_mode[device_id] = bool(enabled)
+    store.log_interlock(payload)
+    _mqtt_publish(topic=f"machinocare/v1/devices/{device_id}/interlock", payload=payload)
+    return {
+        "status": "sent",
+        "command": command,
+        "device_id": device_id,
+        "bench_mode": bool(enabled),
+        "mqtt_connected": _mqtt_client is not None,
+        "timestamp": _utc_now(),
+    }
+
+
 @app.post("/api/v1/interlock/reset/{incident_id}", tags=["Safety"])
 def reset_incident_interlock(
     incident_id: str,
@@ -1046,6 +1083,7 @@ def get_status(device_id: str):
         "current_ma":               state.get("current_ma"),
         "current_temp_c":           state.get("current_temp_c"),
         "active_worker_id":         state.get("active_worker_id"),
+        "bench_mode":               bool(_bench_mode.get(device_id, True)),
         "vicinity_presence_active": bool(state.get("vicinity_presence_active", False)),
         "vicinity_status":          state.get("vicinity_status", "NOMINAL"),
         "proximity_breach_active":  bool(state.get("proximity_breach_active", False)),
