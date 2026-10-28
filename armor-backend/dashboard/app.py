@@ -219,6 +219,135 @@ st.markdown(
         letter-spacing: 0.1em;
         margin-bottom: 8px;
     }
+    /* ── Streamlit Native Element Overrides ─────────────────────── */
+
+    /* Main container & block backgrounds */
+    .stApp, .main .block-container {
+        background-color: var(--armor-bg) !important;
+        color: var(--armor-text-primary) !important;
+    }
+
+    /* All text elements */
+    h1, h2, h3, h4, h5, h6, p, span, label, li, td, th, div {
+        color: var(--armor-text-primary) !important;
+    }
+
+    /* Sidebar text */
+    [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3, [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] span, [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] div {
+        color: var(--armor-text-primary) !important;
+    }
+    [data-testid="stSidebar"] .stCaption, [data-testid="stSidebar"] small {
+        color: var(--armor-text-muted) !important;
+    }
+
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 4px;
+        background-color: rgba(15, 23, 42, 0.6);
+        border-radius: 8px;
+        padding: 4px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        background-color: transparent !important;
+        color: var(--armor-text-muted) !important;
+        border-radius: 6px;
+        padding: 8px 16px;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 0.8rem;
+    }
+    .stTabs [data-baseweb="tab"][aria-selected="true"] {
+        background-color: rgba(6, 182, 212, 0.15) !important;
+        color: var(--armor-cyan) !important;
+        border-bottom: 2px solid var(--armor-cyan);
+    }
+    .stTabs [data-baseweb="tab-highlight"] {
+        background-color: var(--armor-cyan) !important;
+    }
+    .stTabs [data-baseweb="tab-border"] {
+        display: none;
+    }
+
+    /* Buttons */
+    .stButton > button {
+        background: linear-gradient(135deg, rgba(6, 182, 212, 0.2) 0%, rgba(56, 189, 248, 0.1) 100%) !important;
+        color: #ffffff !important;
+        border: 1px solid rgba(6, 182, 212, 0.4) !important;
+        border-radius: 8px;
+        font-weight: 600;
+        transition: all 0.2s ease;
+    }
+    .stButton > button:hover {
+        background: linear-gradient(135deg, rgba(6, 182, 212, 0.35) 0%, rgba(56, 189, 248, 0.2) 100%) !important;
+        border-color: var(--armor-cyan) !important;
+        box-shadow: 0 0 12px rgba(6, 182, 212, 0.3);
+    }
+    .stButton > button[kind="primary"] {
+        background: linear-gradient(135deg, rgba(239, 68, 68, 0.3) 0%, rgba(185, 28, 28, 0.2) 100%) !important;
+        border-color: var(--armor-red) !important;
+    }
+    .stButton > button[kind="primary"]:hover {
+        background: linear-gradient(135deg, rgba(239, 68, 68, 0.5) 0%, rgba(185, 28, 28, 0.35) 100%) !important;
+        box-shadow: 0 0 16px rgba(239, 68, 68, 0.4);
+    }
+
+    /* Text inputs & select boxes */
+    .stTextInput input, .stSelectbox [data-baseweb="select"] {
+        background-color: rgba(15, 23, 42, 0.8) !important;
+        color: #ffffff !important;
+        border-color: rgba(56, 189, 248, 0.2) !important;
+        border-radius: 6px;
+    }
+    .stSelectbox [data-baseweb="select"] > div {
+        background-color: rgba(15, 23, 42, 0.8) !important;
+        color: #ffffff !important;
+    }
+
+    /* Slider */
+    .stSlider [data-baseweb="slider"] {
+        color: var(--armor-cyan) !important;
+    }
+
+    /* Dataframe / table */
+    [data-testid="stDataFrame"], .stDataFrame {
+        border-radius: 8px;
+        overflow: hidden;
+    }
+
+    /* Success / Error / Warning / Info boxes */
+    .stSuccess, .stAlert, [data-testid="stNotification"] {
+        border-radius: 8px !important;
+    }
+
+    /* Toast notifications */
+    [data-testid="stToast"] {
+        background-color: rgba(15, 23, 42, 0.95) !important;
+        border: 1px solid rgba(56, 189, 248, 0.3) !important;
+        backdrop-filter: blur(12px);
+    }
+
+    /* Metric cards (native st.metric) */
+    [data-testid="stMetricValue"] {
+        color: #ffffff !important;
+        font-family: 'Space Grotesk', sans-serif !important;
+    }
+    [data-testid="stMetricLabel"] {
+        color: var(--armor-text-muted) !important;
+    }
+
+    /* Plotly chart container */
+    .js-plotly-plot .plotly .modebar {
+        background: transparent !important;
+    }
+
+    /* Scrollbar styling */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: rgba(0,0,0,0.2); }
+    ::-webkit-scrollbar-thumb { background: rgba(6, 182, 212, 0.3); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(6, 182, 212, 0.5); }
+
     </style>
     """,
     unsafe_allow_html=True,
