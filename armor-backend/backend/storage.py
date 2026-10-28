@@ -261,9 +261,10 @@ class ArmorStore:
     ) -> list[dict[str, Any]]:
         """Map telemetry rows to the feature keys expected by ml_engine.
 
-        ARMOR uses an ADXL345 (accelerometer only), so the gyro fields from
-        MachinoCare 1.0 are reported as zero. The acceleration magnitude is
-        derived from the 3 axes when available, otherwise the measured RMS.
+        ARMOR's ADXL345 reports a scalar RMS; the magnitude is derived from the
+        3 axes when the firmware sends them, otherwise the measured RMS is used.
+        Crest factor, temperature and current are passed through so the
+        server-side model sees more than one signal.
         """
         rows = self.get_recent_telemetry(device_id, limit=limit)
         samples: list[dict[str, Any]] = []
@@ -278,10 +279,9 @@ class ArmorStore:
             samples.append(
                 {
                     "acc_mag": acc_mag,
-                    "gyro_mag": 0.0,
-                    "gx": 0.0,
-                    "gy": 0.0,
-                    "gz": 0.0,
+                    "crest_factor": row.get("crest_factor") or 0.0,
+                    "temperature_c": row.get("temperature_c") or 0.0,
+                    "current_ma": row.get("current_ma") or 0.0,
                 }
             )
         return samples
@@ -512,7 +512,7 @@ class ArmorStore:
                 """
                 SELECT * FROM breach_events
                 WHERE device_id = ?
-                ORDER BY ts DESC LIMIT ?
+                ORDER BY id DESC LIMIT ?
                 """,
                 (device_id, limit),
             ).fetchall()

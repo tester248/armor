@@ -121,6 +121,14 @@ st.markdown(
         color: #ffffff;
         line-height: 1.2;
     }
+    .hud-value.hud-tight {
+        font-size: 1.35rem;
+        white-space: nowrap;
+    }
+    .hud-value.hud-tiny {
+        font-size: 1.05rem;
+        white-space: nowrap;
+    }
     .hud-sub {
         font-size: 0.75rem;
         color: var(--armor-text-muted);
@@ -513,6 +521,8 @@ samples: list[dict[str, Any]] = []
 incidents: list[dict[str, Any]] = []
 model_package: dict[str, Any] | None = None
 anomalies: list[dict[str, Any]] = []
+badges: list[dict[str, Any]] = []
+breaches: list[dict[str, Any]] = []
 
 if backend_online:
     status_data = api_get(f"/api/v1/status/{device_id}", timeout=1.0) or {}
@@ -523,8 +533,13 @@ if backend_online:
     model_resp = api_get(f"/api/v1/model/{device_id}", timeout=1.0)
     if model_resp:
         model_package = model_resp.get("model_package")
-    anomalies_resp = api_get("/api/v1/anomalies", params={"device_id": device_id, "limit": 20}, timeout=1.0)
+    # 120 rows ≈ the last two minutes of 1 Hz scoring — enough for a live trend.
+    anomalies_resp = api_get("/api/v1/anomalies", params={"device_id": device_id, "limit": 120}, timeout=1.0)
     anomalies = anomalies_resp.get("anomalies", []) if anomalies_resp else []
+    workers_resp = api_get("/api/v1/workers", timeout=1.0)
+    badges = workers_resp.get("badges", []) if workers_resp else []
+    breaches_resp = api_get("/api/v1/breaches", params={"device_id": device_id, "limit": 40}, timeout=1.0)
+    breaches = breaches_resp.get("breaches", []) if breaches_resp else []
 
 
 def _reading(value: Any, fallback: Any = None) -> float | None:
@@ -540,6 +555,53 @@ def _reading(value: Any, fallback: Any = None) -> float | None:
         except (TypeError, ValueError):
             pass
     return None
+
+
+def _parse_ts(value: Any) -> datetime | None:
+    """Parse an API timestamp (ISO string, epoch s or epoch ms) to aware UTC."""
+    if value is None or value == "":
+        return None
+    try:
+        if isinstance(value, (int, float)) or (
+            isinstance(value, str) and value.strip().replace(".", "", 1).isdigit()
+        ):
+            num = float(value)
+            if num < 1e10:  # seconds
+                return datetime.fromtimestamp(num, tz=timezone.utc)
+            return datetime.fromtimestamp(num / 1000.0, tz=timezone.utc)
+        dt = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _age_text(value: Any) -> str:
+    """Human readable age of a timestamp, or 'unknown' when unparseable."""
+    dt = _parse_ts(value)
+    if dt is None:
+        return "unknown"
+    seconds = int((datetime.now(timezone.utc) - dt).total_seconds())
+    if seconds < 0:
+        return "just now"
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
+
+
+def _contact_time(value: Any, fallback: Any = None) -> str:
+    """Format a badge contact timestamp, preferring the device ts when sane."""
+    dt = _parse_ts(value)
+    if dt is None or dt.year < 2000:  # ESP32 millis() uptime is not a wall clock
+        dt = _parse_ts(fallback)
+    return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else "—"
+
+
+def _contact_age(event: dict[str, Any]) -> str:
+    return _age_text(event.get("ts") if _parse_ts(event.get("ts")) else event.get("created_at"))
 
 
 motor_state = status_data.get("motor_state") or (samples[-1].get("motor_state") if samples else "NO DATA")
@@ -590,6 +652,35 @@ power_text = f"{power_w:.2f}" if power_w is not None else "--"
 temp_text = f"{current_temp:.1f}" if current_temp is not None else "--"
 cf_text = f"{crest_factor:.2f}" if crest_factor is not None else "--"
 
+# ── Live anomaly score (backend scores once per incoming telemetry sample) ──
+latest_anomaly = anomalies[0] if anomalies else None
+anom_score: float | None = None
+anom_threshold: float | None = None
+anom_age_s: float | None = None
+if latest_anomaly:
+    anom_score = _reading(latest_anomaly.get("score", latest_anomaly.get("anomaly_score")))
+    anom_threshold = _reading(latest_anomaly.get("threshold"))
+    _last_score_dt = _parse_ts(latest_anomaly.get("created_at", latest_anomaly.get("recorded_at")))
+    anom_age_s = (datetime.now(timezone.utc) - _last_score_dt).total_seconds() if _last_score_dt else None
+
+ml_anomaly_active = bool(status_data.get("is_anomaly", False)) or (
+    bool(latest_anomaly.get("is_anomaly", False)) if latest_anomaly else False
+)
+# Scoring runs at telemetry rate (1 Hz); anything older than 15 s is stale.
+ml_score_stale = anom_age_s is not None and anom_age_s > 15
+ml_score_text = f"{anom_score:+.3f}" if anom_score is not None else "--"
+
+if not backend_online:
+    ml_class, ml_label = "status-offline", "GATEWAY OFFLINE"
+elif latest_anomaly is None:
+    ml_class, ml_label = "status-standby", "NOT CALIBRATED"
+elif ml_anomaly_active:
+    ml_class, ml_label = "status-offline", "ANOMALY"
+elif ml_score_stale:
+    ml_class, ml_label = "status-standby", f"STALE ({_age_text(latest_anomaly.get('created_at'))})"
+else:
+    ml_class, ml_label = "status-online", "NOMINAL"
+
 
 # ── Live Connection & System Status Bar ───────────────────────────────────
 mqtt_connected = bool(health.get("mqtt_connected", False)) if backend_online else False
@@ -626,6 +717,10 @@ st.markdown(
         <div class="status-pill {telem_class}">
             <span class="status-dot"></span>
             <span>{telem_text}</span>
+        </div>
+        <div class="status-pill {ml_class}">
+            {icon_svg('activity', color='#38bdf8', size=13)}
+            <span>ML: <b>{ml_score_text}</b> {ml_label}</span>
         </div>
         <div class="status-pill status-active" style="border-color: rgba(56, 189, 248, 0.3);">
             {icon_svg('shield', color='#38bdf8', size=13)}
@@ -822,6 +917,125 @@ with c4:
 
 st.markdown("<br>", unsafe_allow_html=True)
 import pandas as pd
+
+# ── Live Predictive Maintenance (real-time anomaly score) ─────────────────
+st.markdown(
+    f"""
+    <div class="armor-header">
+        {icon_svg('activity', color='#06b6d4', size=22)}
+        <span>Live Predictive Maintenance — Anomaly Score</span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+st.caption(
+    "Server-side IsolationForest scored once per incoming telemetry sample. "
+    "This panel updates with the dashboard auto-refresh."
+)
+
+if not backend_online:
+    st.info("Gateway offline — live anomaly scoring unavailable.")
+elif model_package is None:
+    st.warning("No calibrated model yet. Run calibration below; scores appear here automatically once telemetry flows.")
+elif latest_anomaly is None:
+    st.info("Model is calibrated. Waiting for the next telemetry window to be scored…")
+else:
+    import json as _json
+
+    _pkg_raw = model_package.get("model_package") if isinstance(model_package, dict) else None
+    try:
+        _live_pkg = _json.loads(_pkg_raw) if _pkg_raw else {}
+    except (TypeError, ValueError):
+        _live_pkg = {}
+
+    if ml_anomaly_active:
+        score_color, hud_class, state_text = "#ef4444", "hud-red", "ANOMALY"
+    elif ml_score_stale:
+        score_color, hud_class, state_text = "#f59e0b", "hud-amber", "STALE"
+    else:
+        score_color, hud_class, state_text = "#10b981", "hud-green", "NOMINAL"
+
+    margin = (anom_score - anom_threshold) if (anom_score is not None and anom_threshold is not None) else None
+    anom_count = sum(1 for a in anomalies if bool(a.get("is_anomaly")))
+
+    an1, an2, an3, an4 = st.columns(4)
+
+    with an1:
+        st.markdown(
+            f"""
+            <div class="hud-card {hud_class}">
+                <div class="hud-title">Anomaly Score</div>
+                <div class="hud-value hud-tight" style="color:{score_color};">{anom_score:+.4f}</div>
+                <div class="hud-sub">Threshold {anom_threshold:+.4f}<br>Margin {margin:+.4f}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with an2:
+        st.markdown(
+            f"""
+            <div class="hud-card {hud_class}">
+                <div class="hud-title">Model Verdict</div>
+                <div class="hud-value hud-tight" style="color:{score_color};">{state_text}</div>
+                <div class="hud-sub">score &gt; 0 = anomaly</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with an3:
+        st.markdown(
+            f"""
+            <div class="hud-card">
+                <div class="hud-title">Last Scored</div>
+                <div class="hud-value hud-tight">{_age_text(latest_anomaly.get('created_at', latest_anomaly.get('recorded_at')))}</div>
+                <div class="hud-sub">{str(latest_anomaly.get('created_at', latest_anomaly.get('recorded_at', 'N/A')))[:19].replace('T', ' ')} UTC</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with an4:
+        st.markdown(
+            f"""
+            <div class="hud-card">
+                <div class="hud-title">Model</div>
+                <div class="hud-value hud-tiny">IForest</div>
+                <div class="hud-sub">{_live_pkg.get('window_count', '?')} windows<br>{anom_count} flagged / {len(anomalies)} scores</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    hist = [
+        a for a in reversed(anomalies)
+        if _reading(a.get("score", a.get("anomaly_score"))) is not None
+    ]
+    if len(hist) >= 2:
+        chart_rows = []
+        for a in hist:
+            ts = _parse_ts(a.get("created_at", a.get("recorded_at")))
+            if ts is None:
+                continue
+            chart_rows.append(
+                {
+                    "Time": ts,
+                    "Anomaly score": float(_reading(a.get("score", a.get("anomaly_score"))) or 0.0),
+                    "Decision threshold": float(_reading(a.get("threshold")) or 0.0),
+                }
+            )
+        if len(chart_rows) >= 2:
+            hist_df = pd.DataFrame(chart_rows).set_index("Time")
+            st.line_chart(hist_df, height=220, color=["#38bdf8", "#ef4444"])
+            refresh_note = (
+                f"refreshing every {refresh_rate}s" if refresh_rate > 0 else "auto-refresh paused — resume in the sidebar"
+            )
+            st.caption(
+                f"Trend of the last {len(chart_rows)} scored windows "
+                f"(oldest {_age_text(hist[0].get('created_at'))}); {refresh_note}."
+            )
+
 
 def _build_df(samples):
     if not samples:
@@ -1320,20 +1534,20 @@ with test_cols[1]:
     if "vibration" in st.session_state.test_results:
         an = st.session_state.test_results["vibration"]
         if an:
-            score = an.get("anomaly_score", 0.0)
+            score = an.get("score", an.get("anomaly_score", 0.0))
             threshold = an.get("threshold", 0.0)
             is_anom = bool(an.get("is_anomaly", False))
             if is_anom:
                 st.error(f"❌ ANOMALY DETECTED — score {score:.3f} >= threshold {threshold:.3f}")
             else:
                 st.success(f"✅ NOMINAL — score {score:.3f} < threshold {threshold:.3f}")
-            st.caption(f"Recorded: {an.get('recorded_at', 'N/A')[:19]}")
+            st.caption(f"Recorded: {str(an.get('created_at', an.get('recorded_at', 'N/A')))[:19]}")
         else:
             st.warning("No anomaly records found. Run calibration first, then collect telemetry.")
     else:
         if anomalies:
             latest = anomalies[0]
-            score = latest.get("anomaly_score", 0.0)
+            score = latest.get("score", latest.get("anomaly_score", 0.0))
             threshold = latest.get("threshold", 0.0)
             is_anom = bool(latest.get("is_anomaly", False))
             st.caption(f"Latest anomaly: score={score:.3f}, threshold={threshold:.3f}, anomaly={'YES' if is_anom else 'no'}")
@@ -1396,7 +1610,7 @@ if st.session_state.test_results:
         elif test_name == "vibration":
             if result:
                 is_anom = bool(result.get("is_anomaly", False))
-                summary_rows.append({"Test": "Vibration Anomaly", "Status": "ANOMALY" if is_anom else "NOMINAL", "Detail": f"score={result.get('anomaly_score', 0):.3f}"})
+                summary_rows.append({"Test": "Vibration Anomaly", "Status": "ANOMALY" if is_anom else "NOMINAL", "Detail": f"score={result.get('score', result.get('anomaly_score', 0)):.3f}"})
             else:
                 summary_rows.append({"Test": "Vibration Anomaly", "Status": "NO DATA", "Detail": ""})
         elif test_name == "camera":
@@ -1417,7 +1631,7 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-st.caption("Train the IsolationForest-distilled anomaly model on real ADXL345 telemetry. No synthetic data.")
+st.caption("Train a full IsolationForest on real ADXL345 telemetry; scoring runs on the backend. No synthetic data.")
 
 cal_left, cal_right = st.columns(2)
 
@@ -1443,11 +1657,10 @@ with cal_left:
             st.caption(f"Mean acc: {baseline.get('mean_acc', 0):.4f} g")
             st.caption(f"Std acc: {baseline.get('std_acc', 0):.4f} g")
             st.caption(f"Samples: {baseline.get('sample_count', 0)}")
-        thresholds = pkg.get("thresholds", {}) if isinstance(pkg, dict) else {}
-        if thresholds:
-            st.caption(f"Decision threshold: {thresholds.get('decision_threshold', 'N/A')}")
-            st.caption(f"Hysteresis high: {thresholds.get('hysteresis_high', 'N/A')}")
-            st.caption(f"Hysteresis low: {thresholds.get('hysteresis_low', 'N/A')}")
+        if isinstance(pkg, dict) and pkg:
+            st.caption(f"Decision threshold: {pkg.get('decision_threshold', 'N/A')}")
+            st.caption(f"Hysteresis high: {pkg.get('hysteresis_high', 'N/A')}")
+            st.caption(f"Hysteresis low: {pkg.get('hysteresis_low', 'N/A')}")
     else:
         st.warning("\u26a0\ufe0f No calibrated model yet")
         st.caption("Collect 20+ telemetry samples, then run calibration below.")
@@ -1485,7 +1698,7 @@ with cal_left:
 
     if "calibration" in st.session_state.test_results:
         cresp = st.session_state.test_results["calibration"]
-        st.success(f"Calibration done — {cresp.get('window_count', 0)} windows, quality={cresp.get('quality', 'N/A')}")
+        st.success(f"Calibration done — {cresp.get('window_count', 0)} windows, model={cresp.get('model_type', 'N/A')}")
 
 with cal_right:
     st.markdown("#### Sample Availability")
@@ -1504,14 +1717,163 @@ with cal_right:
         an_rows = []
         for a in anomalies[:10]:
             an_rows.append({
-                "Score": f"{float(a.get('anomaly_score', 0) or 0):.3f}",
+                "Score": f"{float(a.get('score', a.get('anomaly_score', 0)) or 0):.3f}",
                 "Threshold": f"{float(a.get('threshold', 0) or 0):.3f}",
                 "Anomaly": "YES" if bool(a.get("is_anomaly")) else "no",
-                "Time": str(a.get("recorded_at", ""))[:19],
+                "Time": str(a.get("created_at", a.get("recorded_at", "")))[:19],
             })
         st.dataframe(an_rows, use_container_width=True, hide_index=True)
     else:
         st.info("No anomaly records yet. Run calibration first.")
+
+st.markdown("<br>", unsafe_allow_html=True)
+# ══════════════════════════════════════════════════════════════════════════════
+# WEARABLE SMART BADGE TELEMETRY (ESP-NOW → machine node → backend)
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown(
+    f"""
+    <div class="armor-header">
+        {icon_svg('badge', color='#06b6d4', size=22)}
+        <span>Wearable Smart Badge Telemetry</span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+st.caption(
+    "Registry from `POST /api/v1/workers`; contact rows are the ESP-NOW proximity reports "
+    "the machine node forwards to `/api/v1/breaches`. Badges only report while in range."
+)
+
+if not backend_online:
+    st.info("Gateway offline — badge telemetry unavailable.")
+else:
+    badge_by_mac = {b.get("badge_mac"): b for b in badges}
+    latest_contact = breaches[0] if breaches else None
+    active_badges = [b for b in badges if b.get("active")]
+    latest_distance = _reading(latest_contact.get("distance_est_m")) if latest_contact else None
+
+    w1, w2 = st.columns(2)
+    w3, w4 = st.columns(2)
+
+    with w1:
+        st.markdown(
+            f"""
+            <div class="hud-card">
+                <div class="hud-title">Registered Badges</div>
+                <div class="hud-value">{len(badges)}</div>
+                <div class="hud-sub">{len(active_badges)} active · {len(badges) - len(active_badges)} deactivated</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with w2:
+        _contact_badge = badge_by_mac.get((latest_contact or {}).get("badge_mac"), {})
+        if active_worker:
+            _worker_sub = _contact_badge.get("worker_name") or "Operator logged in"
+        else:
+            _worker_sub = (
+                f"Last contact: {_contact_badge.get('worker_name')}"
+                if _contact_badge.get("worker_name")
+                else "No operator currently logged"
+            )
+        st.markdown(
+            f"""
+            <div class="hud-card">
+                <div class="hud-title">Worker In Cell</div>
+                <div class="hud-value hud-tight">{active_worker or '—'}</div>
+                <div class="hud-sub">{_worker_sub}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with w3:
+        zone_class = "hud-red" if proximity_breach else "hud-green"
+        _distance_sub = (
+            f"latest contact {latest_distance:.2f} m ({_contact_age(latest_contact)})"
+            if latest_distance is not None and latest_contact
+            else "no contact recorded"
+        )
+        st.markdown(
+            f"""
+            <div class="hud-card {zone_class}">
+                <div class="hud-title">Safety Perimeter</div>
+                <div class="hud-value">{'BREACH' if proximity_breach else 'CLEAR'}</div>
+                <div class="hud-sub">Danger boundary &lt; 1.5 m · {_distance_sub}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with w4:
+        st.markdown(
+            f"""
+            <div class="hud-card">
+                <div class="hud-title">Last Badge Contact</div>
+                <div class="hud-value hud-tight">{_contact_age(latest_contact) if latest_contact else '—'}</div>
+                <div class="hud-sub">{str((latest_contact or {}).get('worker_id') or 'No contacts recorded')}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>Badge Registry</div>", unsafe_allow_html=True)
+    if badges:
+        badge_rows = [
+            {
+                "Worker ID": b.get("worker_id", "?"),
+                "Name": b.get("worker_name") or "—",
+                "Department": b.get("department") or "—",
+                "Badge MAC": b.get("badge_mac", "?"),
+                "Status": "ACTIVE" if b.get("active") else "inactive",
+            }
+            for b in badges
+        ]
+        st.dataframe(pd.DataFrame(badge_rows), width="stretch", hide_index=True)
+    else:
+        st.info("No badges registered yet.")
+
+    st.markdown("<div class='section-title'>Recent Proximity Contacts</div>", unsafe_allow_html=True)
+    if breaches:
+        contact_rows = []
+        for br in breaches[:12]:
+            distance = _reading(br.get("distance_est_m"))
+            contact_rows.append(
+                {
+                    "Time": _contact_time(br.get("ts"), br.get("created_at")),
+                    "Worker": br.get("worker_id") or "UNKNOWN",
+                    "Dist (m)": f"{distance:.2f}" if distance is not None else "—",
+                    "RSSI": br.get("rssi_raw") if br.get("rssi_raw") is not None else "—",
+                    "RSSI EMA": f"{float(br.get('rssi_smoothed')):.1f}" if br.get("rssi_smoothed") is not None else "—",
+                    "Zone": "DANGER" if (distance is not None and distance < 1.5) else "approach",
+                }
+            )
+        st.dataframe(pd.DataFrame(contact_rows), width="stretch", hide_index=True)
+    else:
+        st.info("No proximity contacts yet. They appear when a badge comes within ESP-NOW range of the machine node.")
+
+    contact_hist: list[tuple[datetime, float]] = []
+    for br in reversed(breaches):
+        if br.get("rssi_smoothed") is None:
+            continue
+        _dt = _parse_ts(br.get("ts"))
+        if _dt is None or _dt.year < 2000:  # ESP32 uptime is not a wall clock
+            _dt = _parse_ts(br.get("created_at"))
+        if _dt is None:
+            continue
+        contact_hist.append((_dt, float(br["rssi_smoothed"])))
+
+    if len(contact_hist) >= 2:
+        rssi_df = pd.DataFrame(
+            {
+                "Time": [dt for dt, _ in contact_hist],
+                "RSSI (dBm)": [rssi for _, rssi in contact_hist],
+            }
+        ).set_index("Time")
+        st.line_chart(rssi_df, height=180, color=["#06b6d4"])
+        st.caption("Smoothed RSSI of received badge contacts. More negative = further from the machine node.")
 
 st.markdown("<br>", unsafe_allow_html=True)
 # ══════════════════════════════════════════════════════════════════════════════
