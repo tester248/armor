@@ -445,34 +445,22 @@ with st.sidebar:
         st.error("● Gateway Offline")
         st.caption("Start backend in terminal:<br>`python -m uvicorn --app-dir armor-backend backend.main:app --port 8000`", unsafe_allow_html=True)
 
-    st.markdown("---")
     st.markdown(
         f"""
         <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
             {icon_svg('zap', color='#f59e0b', size=16)}
-            <span style="font-family:'Space Grotesk',sans-serif; font-size:0.95rem; font-weight:700; color:#ffffff;">Quick Simulation Triggers</span>
+            <span style="font-family:'Space Grotesk',sans-serif; font-size:0.95rem; font-weight:700; color:#ffffff;">ESP32 Machine Node</span>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
-    if st.button("Simulate Proximity Breach (<1.5m)", icon=":material/directions_walk:", use_container_width=True, type="secondary", disabled=not backend_online):
-        code, resp = api_post(
-            "/api/v1/breach",
-            json_data={
-                "device_id": device_id,
-                "worker_id": "WORKER_EMP_402",
-                "badge_mac": "24:6F:28:AB:C1:02",
-                "distance_est_m": 1.2,
-                "rssi_smoothed": -60.5,
-            },
-        )
-        if code in (200, 202):
-            st.toast("Proximity breach event sent! Vision inspection triggered.", icon=":material/warning:")
-        else:
-            st.error(f"Failed to post breach: {resp}")
+    if backend_online:
+        st.caption("Telemetry arrives via MQTT from the ESP32. No simulation.")
+    else:
+        st.caption("Start backend to receive ESP32 telemetry.")
 
     st.markdown("---")
+
     st.markdown(
         f"""
         <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
@@ -933,7 +921,7 @@ with right_col:
 
     else:
         with chart_tab1:
-            st.info("Awaiting telemetry stream from ESP32 machine node. Run `python scripts/simulate_esp32.py` to stream live sensor readings.")
+            st.info("Awaiting telemetry stream from ESP32 machine node via MQTT.")
         with chart_tab2:
             st.info("Awaiting current & voltage readings from INA219.")
         with chart_tab3:
