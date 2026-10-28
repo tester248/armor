@@ -32,7 +32,7 @@
 // Reserve a static DHCP lease for that laptop so this address does not drift.
 const char* WIFI_SSID     = "ARMOR";
 const char* WIFI_PASSWORD = "12345678";
-const char* MQTT_BROKER   = "10.24.103.35";   // Backend host (laptop) on the hotspot
+const char* MQTT_BROKER   = "10.24.103.187";   // Friend's laptop running the ARMOR backend
 const uint16_t MQTT_PORT  = 1883;
 const char* DEVICE_ID     = "machino_node_01";
 
