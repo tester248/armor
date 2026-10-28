@@ -267,7 +267,8 @@ void ensureMqtt() {
   if (now - lastAttempt < 5000) return;
   lastAttempt = now;
 
-  String clientId = String("armor-node-") + DEVICE_ID;
+  uint64_t chipId = ESP.getEfuseMac();
+  String clientId = String("armor-node-") + DEVICE_ID + "-" + String((uint16_t)chipId, HEX);
   if (mqtt.connect(clientId.c_str())) {
     String topic = String("machinocare/v1/devices/") + DEVICE_ID + "/interlock";
     mqtt.subscribe(topic.c_str(), 1);
@@ -334,8 +335,10 @@ void core0Task(void* pv) {
     readAxes(ax, ay, az);
     accumulateVibration(ax, ay, az);
 
-    gVoltageV  = ina219.getBusVoltage_V();
-    gCurrentMa = ina219.getCurrent_mA();
+    float vBus = ina219.getBusVoltage_V();
+    float cMa  = ina219.getCurrent_mA();
+    if (!isnan(vBus)) gVoltageV  = vBus;
+    if (!isnan(cMa))  gCurrentMa = cMa;
 
     // DS18B20 conversion takes ~750 ms. Request it without blocking and read
     // the result on a later iteration so the 100 Hz sampling loop stays intact.
@@ -394,9 +397,10 @@ void core1Task(void* pv) {
   }
 
   mqtt.setServer(MQTT_BROKER, MQTT_PORT);
+  mqtt.setBufferSize(512);   // Expand from default 256 bytes so JSON payload is not silently dropped!
   mqtt.setCallback(mqttCallback);
-  mqtt.setKeepAlive(15);
-  mqtt.setSocketTimeout(2);
+  mqtt.setKeepAlive(60);     // Prevent cloud Blynk latency from triggering MQTT timeout
+  mqtt.setSocketTimeout(3);
 
   uint32_t lastTelemetry = 0;
   uint32_t lastBreachCheck = 0;
@@ -458,26 +462,45 @@ void core1Task(void* pv) {
 
       // Publish Telemetry to MQTT
       if (mqtt.connected()) {
-        StaticJsonDocument<320> doc;
+        float v_val = isnan(gVoltageV) ? 0.0f : gVoltageV;
+        float c_val = isnan(gCurrentMa) ? 0.0f : gCurrentMa;
+        float rms_val = isnan(gRms) ? 0.0f : gRms;
+        float temp_val = isnan(gTempC) ? 25.0f : gTempC;
+
+        StaticJsonDocument<512> doc;
         doc["device_id"]   = DEVICE_ID;
         time_t epochSec = time(nullptr);
         if (epochSec > 1700000000) {           // NTP synced
           doc["timestamp"] = (uint64_t)epochSec * 1000ULL;
+        } else {
+          doc["timestamp"] = (uint64_t)millis(); // Fallback so timestamp is never absent
         }
         doc["motor_state"] = gInterlock ? "LOCKED" : (motorRunning ? "RUNNING" : "IDLE");
+
+        // Uniform flat schema fields
+        doc["rms"]           = rms_val;
+        doc["voltage_v"]     = v_val;
+        doc["current_ma"]    = c_val;
+        doc["power_mw"]      = v_val * c_val;
+        doc["temperature_c"] = temp_val;
+
+        // Nested objects (for strict schema backend compatibility)
         JsonObject vib = doc.createNestedObject("vibration");
-        vib["rms"]          = gRms;
-        vib["crest_factor"] = gCrestFactor;
+        vib["rms"]          = rms_val;
+        vib["crest_factor"] = isnan(gCrestFactor) ? 0.0f : gCrestFactor;
+
         JsonObject pwr = doc.createNestedObject("power");
-        pwr["voltage_v"] = gVoltageV;
-        pwr["current_ma"]= gCurrentMa;
-        pwr["power_mw"]  = gVoltageV * gCurrentMa;
-        doc["temperature_c"] = gTempC;
+        pwr["voltage_v"] = v_val;
+        pwr["current_ma"]= c_val;
+        pwr["power_mw"]  = v_val * c_val;
 
         char buf[512];
-        serializeJson(doc, buf);
+        size_t n = serializeJson(doc, buf);
         String topic = String("machinocare/v1/devices/") + DEVICE_ID + "/telemetry";
-        mqtt.publish(topic.c_str(), buf, false);
+        bool ok = mqtt.publish(topic.c_str(), buf, false);
+        if (!ok) {
+          Serial.printf("[MQTT] Publish FAILED! Payload length: %u bytes\r\n", (unsigned int)n);
+        }
       }
     }
 
