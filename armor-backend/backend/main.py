@@ -23,9 +23,9 @@ Implements SW Member 2 scope from ARMOR_System_Architecture_and_Implementation_P
 
 MQTT Topics (Eclipse Mosquitto)
 ────────────────────────────────
-  Subscribe  armor/+/telemetry      ← ADXL345 / INA219 / DS18B20 readings
-  Subscribe  armor/gateway/breach   ← ESP-NOW proximity breach events
-  Publish    armor/{device}/interlock ← LOCKOUT / RESET commands to machine node
+  Subscribe  machinocare/v1/devices/+/telemetry      ← ADXL345 / INA219 / DS18B20 readings
+  Subscribe  machinocare/v1/events/proximity   ← ESP-NOW proximity breach events
+  Publish    machinocare/v1/devices/{device}/interlock ← LOCKOUT / RESET commands to machine node
 """
 from __future__ import annotations
 
@@ -36,6 +36,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -45,11 +46,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 # ── Load env ──────────────────────────────────────────────────────────────────
-load_dotenv()
+_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(_ENV_PATH)
 
 # ── Local imports ─────────────────────────────────────────────────────────────
 from backend.storage import ArmorStore
-from backend.vision_stub import vision_engine
+from backend.vision import vision_engine
 from backend.models import (
     TelemetryIngestRequest,
     ProximityBreachEvent,
@@ -112,7 +114,7 @@ _mqtt_client = None
 
 
 def _handle_telemetry_message(payload: dict[str, Any]) -> None:
-    """Process incoming telemetry from armor/+/telemetry topic."""
+    """Process incoming telemetry from machinocare/v1/devices/+/telemetry topic."""
     vib = payload.get("vibration") or {}
     pwr = payload.get("power") or {}
 
@@ -135,7 +137,7 @@ def _handle_telemetry_message(payload: dict[str, Any]) -> None:
 
 def _handle_breach_message(payload: dict[str, Any]) -> None:
     """
-    Process proximity breach event from armor/gateway/breach topic.
+    Process proximity breach event from machinocare/v1/events/proximity topic.
     Sequence (from ARMOR MD sequence diagram):
       1. Log breach event
       2. Update machine state (breach active)
@@ -188,7 +190,7 @@ def _handle_breach_message(payload: dict[str, Any]) -> None:
 
         # Publish LOCKOUT to machine node via MQTT
         _mqtt_publish(
-            topic=f"armor/{device_id}/interlock",
+            topic=f"machinocare/v1/devices/{device_id}/interlock",
             payload=lockout_cmd,
         )
 
@@ -235,7 +237,7 @@ def _start_mqtt() -> None:
         def on_connect(client, userdata, flags, rc):
             if rc == 0:
                 print(f"[MQTT] Connected to {MQTT_BROKER}:{MQTT_PORT}")
-                client.subscribe("armor/#", qos=1)
+                client.subscribe("machinocare/v1/#", qos=1)
             else:
                 print(f"[MQTT] Connection failed, rc={rc}")
 
@@ -248,7 +250,7 @@ def _start_mqtt() -> None:
             topic = msg.topic
             if topic.endswith("/telemetry"):
                 _handle_telemetry_message(payload)
-            elif topic == "armor/gateway/breach":
+            elif topic == "machinocare/v1/events/proximity":
                 threading.Thread(
                     target=_handle_breach_message,
                     args=(payload,),
@@ -369,14 +371,14 @@ def get_telemetry(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Proximity Breach  (armor/gateway/breach)
+# Proximity Breach  (machinocare/v1/events/proximity)
 # ══════════════════════════════════════════════════════════════════════════════
 @app.post("/api/v1/breach", status_code=202, tags=["Safety"])
 def proximity_breach(payload: ProximityBreachEvent):
     """
     Receive proximity breach event from Machine Node ESP32.
     Triggers Vision AI inspection pipeline automatically.
-    MQTT topic: armor/gateway/breach
+    MQTT topic: machinocare/v1/events/proximity
     JSON schema per ARMOR spec section 5.2
     """
     threading.Thread(
@@ -394,7 +396,7 @@ def proximity_breach(payload: ProximityBreachEvent):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Interlock  (armor/{device}/interlock)
+# Interlock  (machinocare/v1/devices/{device}/interlock)
 # ══════════════════════════════════════════════════════════════════════════════
 @app.post("/api/v1/interlock", status_code=200, tags=["Safety"])
 def issue_interlock(payload: InterlockCommand, device_id: str = Query(default="machino_node_01")):
@@ -429,7 +431,7 @@ def issue_interlock(payload: InterlockCommand, device_id: str = Query(default="m
         )
 
     # Publish to MQTT so machine node GPIO acts immediately
-    _mqtt_publish(topic=f"armor/{device_id}/interlock", payload=cmd_dict)
+    _mqtt_publish(topic=f"machinocare/v1/devices/{device_id}/interlock", payload=cmd_dict)
 
     return {
         "status": "sent",

@@ -14,7 +14,7 @@ if os.path.exists(backend_dir):
 else:
     sys.path.insert(0, os.path.dirname(__file__))
 
-from backend.vision_stub import vision_engine
+from backend.vision import vision_engine
 
 
 def test_vision():
