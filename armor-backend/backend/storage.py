@@ -512,7 +512,7 @@ class ArmorStore:
                 """
                 SELECT * FROM breach_events
                 WHERE device_id = ?
-                ORDER BY ts DESC LIMIT ?
+                ORDER BY id DESC LIMIT ?
                 """,
                 (device_id, limit),
             ).fetchall()

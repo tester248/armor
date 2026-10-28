@@ -775,6 +775,20 @@ def list_workers(active_only: bool = Query(default=False)):
     return {"count": len(badges), "badges": badges}
 
 
+@app.get("/api/v1/breaches", tags=["Workers"])
+def list_breaches(
+    device_id: str = Query(default="machino_node_01"),
+    limit: int = Query(default=30, ge=1, le=500),
+):
+    """Recent ESP-NOW proximity contacts reported by worker badges.
+
+    Each row is one contact the machine node received from a badge, with the
+    RSSI values and the distance estimate it derived.
+    """
+    events = store.get_recent_breaches(device_id, limit=limit)
+    return {"count": len(events), "breaches": events}
+
+
 @app.delete("/api/v1/workers/{badge_mac}", tags=["Workers"])
 def deactivate_worker(badge_mac: str):
     """Deactivate a badge (worker left site)."""
