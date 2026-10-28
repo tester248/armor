@@ -131,29 +131,38 @@ void setup() {
 }
 
 void loop() {
-  beacon.sequence_num   = seq++;
+  beacon.sequence_num    = seq++;
   beacon.battery_voltage = readBattery();
 
-  // Pulse LED briefly on beacon transmission
-  digitalWrite(PIN_LED, HIGH);
+  // Reset ACK status for this cycle
+  lastAckReceived = false;
 
   // Send Unicast directly to our paired Machine Node
-  esp_err_t res = esp_now_send(targetNodeMac, (uint8_t*)&beacon, sizeof(beacon));
+  esp_now_send(targetNodeMac, (uint8_t*)&beacon, sizeof(beacon));
 
   // Also send broadcast so any backup listeners can hear
   esp_now_send(broadcastMac, (uint8_t*)&beacon, sizeof(beacon));
 
-  delay(20);
-  digitalWrite(PIN_LED, LOW);
+  // Allow brief window for 802.11 hardware ACK callback
+  delay(10);
+
+  // Visual Confirmation: Flash LED ONLY when the Machine Node acknowledges receipt
+  if (lastAckReceived) {
+    digitalWrite(PIN_LED, HIGH);
+    delay(25);
+    digitalWrite(PIN_LED, LOW);
+    delay(165);
+  } else {
+    digitalWrite(PIN_LED, LOW);
+    delay(190);
+  }
 
   if (seq % 5 == 0) {
     // Print 1 Hz heartbeat to Serial Monitor
     Serial.printf("[BEACON #%u] %s | Batt: %.2f V | Ch: %d\r\n",
                   beacon.sequence_num,
-                  lastAckReceived ? "ACK RECEIVED from Node" : "Sent (waiting for Node ACK)",
+                  lastAckReceived ? "ACK RECEIVED from Node (Paired & Active)" : "NO ACK (Node OFF / Out of Range)",
                   beacon.battery_voltage,
                   activeChannel);
   }
-
-  delay(180);   // ~5 Hz beacon rate total (20ms + 180ms)
 }
