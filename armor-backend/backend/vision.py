@@ -63,7 +63,7 @@ ROBOFLOW_API_URL = os.getenv("ROBOFLOW_API_URL", "https://serverless.roboflow.co
 def _make_result(
     worker_id: str,
     device_id: str,
-    compliant: bool,
+    compliant: bool | None,
     compliance_ratio: float,
     label: str,
     snapshot_path: str | None = None,
@@ -249,56 +249,34 @@ def _roboflow_inspect(frame, worker_id):
     return compliant, compliance_ratio, label, annotated
 
 
-# ── Stub compliance check (no YOLO model) ─────────────────────────────────────
-def _stub_inspect(frame: np.ndarray, worker_id: str) -> tuple[bool, float, str, np.ndarray]:
+# ── No-vision fallback (no model configured) ──────────────────────────────────
+def _stub_inspect(frame: np.ndarray, worker_id: str) -> tuple[None, float, str, np.ndarray]:
     """
-    Mock helmet inspection.
-    Draws a coloured bounding box and mask overlay on the frame.
-    Alternates PASS/FAIL every 10 seconds for demo purposes.
-    Returns: (compliant, compliance_ratio, label, annotated_frame)
+    Helmet inspection is unavailable when no Roboflow credentials are configured.
+
+    This deliberately does NOT fabricate a PASS/FAIL verdict. Returning
+    compliant=None tells the caller to skip the interlock decision, because
+    pretending a worker is safe (or unsafe) would be worse than reporting
+    that vision is offline.
+
+    Returns: (None, 0.0, "VISION_UNAVAILABLE", annotated_frame)
     """
     h, w = frame.shape[:2]
     annotated = frame.copy()
 
-    # Simulate head ROI (top-centre of frame)
-    roi_x1 = w // 4
-    roi_y1 = int(h * 0.05)
-    roi_x2 = 3 * w // 4
-    roi_y2 = int(h * 0.45)
-
-    # Alternate PASS/FAIL every 10 s for demo
-    cycle = int(time.time()) % 20
-    if cycle < 10:
-        # PASS – helmet detected
-        compliance_ratio = 0.82
-        compliant = True
-        label = "HELMET_PASS"
-        colour = (0, 200, 80)   # green
-        mask_ratio = 0.82
-    else:
-        # FAIL – no helmet
-        compliance_ratio = 0.18
-        compliant = False
-        label = "HELMET_FAIL"
-        colour = (0, 60, 220)   # red (BGR)
-        mask_ratio = 0.18
-
-    # Draw head ROI box
-    cv2.rectangle(annotated, (roi_x1, roi_y1), (roi_x2, roi_y2), (200, 200, 0), 2)
-
-    # Draw mock segmentation mask overlay
-    mask_overlay = annotated.copy()
-    mask_x2 = roi_x1 + int((roi_x2 - roi_x1) * mask_ratio)
-    cv2.rectangle(mask_overlay, (roi_x1, roi_y1), (mask_x2, roi_y2), colour, -1)
-    cv2.addWeighted(mask_overlay, 0.35, annotated, 0.65, 0, annotated)
-
-    # Labels
-    cv2.rectangle(annotated, (roi_x1, roi_y1), (roi_x2, roi_y2), colour, 2)
+    colour = (0, 200, 255)  # amber (BGR)
+    cv2.rectangle(annotated, (0, 0), (w - 1, h - 1), colour, 3)
     cv2.putText(
         annotated,
-        f"{label}  ratio={compliance_ratio:.2f}",
-        (roi_x1, roi_y1 - 10),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 2,
+        "VISION UNAVAILABLE - helmet check skipped",
+        (20, 40),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.7, colour, 2,
+    )
+    cv2.putText(
+        annotated,
+        "Configure ROBOFLOW_API_KEY to enable compliance checks",
+        (20, 70),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1,
     )
     cv2.putText(
         annotated,
@@ -307,15 +285,7 @@ def _stub_inspect(frame: np.ndarray, worker_id: str) -> tuple[bool, float, str, 
         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1,
     )
 
-    # STUB watermark
-    cv2.putText(
-        annotated,
-        "[ STUB – No YOLO model loaded ]",
-        (10, 25),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 1,
-    )
-
-    return compliant, compliance_ratio, label, annotated
+    return None, 0.0, "VISION_UNAVAILABLE", annotated
 
 
 # ── Vision Engine ──────────────────────────────────────────────────────────────

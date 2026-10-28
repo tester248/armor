@@ -198,7 +198,7 @@ class ArmorStore:
                 (
                     data.get("device_id", "unknown"),
                     data.get("timestamp", _utc_now()),
-                    data.get("motor_state", "RUNNING"),
+                    data.get("motor_state", "UNKNOWN"),
                     data.get("accel_x"),
                     data.get("accel_y"),
                     data.get("accel_z"),
@@ -228,7 +228,7 @@ class ArmorStore:
                 """,
                 (
                     data.get("device_id", "unknown"),
-                    data.get("motor_state", "RUNNING"),
+                    data.get("motor_state", "UNKNOWN"),
                     data.get("timestamp", _utc_now()),
                     data.get("rms"),
                     data.get("voltage_v"),
@@ -255,6 +255,36 @@ class ArmorStore:
                 (device_id, limit),
             ).fetchall()
         return list(reversed(self._rows_to_list(rows)))
+
+    def get_recent_samples_for_ml(
+        self, device_id: str, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        """Map telemetry rows to the feature keys expected by ml_engine.
+
+        ARMOR uses an ADXL345 (accelerometer only), so the gyro fields from
+        MachinoCare 1.0 are reported as zero. The acceleration magnitude is
+        derived from the 3 axes when available, otherwise the measured RMS.
+        """
+        rows = self.get_recent_telemetry(device_id, limit=limit)
+        samples: list[dict[str, Any]] = []
+        for row in rows:
+            ax = row.get("accel_x")
+            ay = row.get("accel_y")
+            az = row.get("accel_z")
+            if ax is not None and ay is not None and az is not None:
+                acc_mag = (float(ax) ** 2 + float(ay) ** 2 + float(az) ** 2) ** 0.5
+            else:
+                acc_mag = float(row.get("rms") or 0.0)
+            samples.append(
+                {
+                    "acc_mag": acc_mag,
+                    "gyro_mag": 0.0,
+                    "gx": 0.0,
+                    "gy": 0.0,
+                    "gz": 0.0,
+                }
+            )
+        return samples
 
     # ------------------------------------------------------------------ #
     # Machine State

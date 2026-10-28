@@ -143,6 +143,24 @@ def _score_anomaly(device_id: str) -> None:
         print(f"[ML] Anomaly scoring failed: {e}")
 
 
+def _telemetry_timestamp(value: Any) -> str:
+    """Normalise an incoming timestamp. ESP32 millis() is not a wall-clock time."""
+    if isinstance(value, (int, float)):
+        # Accept epoch milliseconds only; smaller numbers are uptime counters.
+        if value > 1_000_000_000_000:
+            return datetime.fromtimestamp(value / 1000.0, tz=timezone.utc).isoformat()
+        return _utc_now()
+    if isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.isoformat()
+        except ValueError:
+            return _utc_now()
+    return _utc_now()
+
+
 def _handle_telemetry_message(payload: dict[str, Any]) -> None:
     """Process incoming telemetry from machinocare/v1/devices/+/telemetry topic."""
     vib = payload.get("vibration") or {}
@@ -150,8 +168,8 @@ def _handle_telemetry_message(payload: dict[str, Any]) -> None:
 
     record = {
         "device_id":    payload.get("device_id", "machino_node_01"),
-        "timestamp":    payload.get("timestamp", _utc_now()),
-        "motor_state":  payload.get("motor_state", "RUNNING"),
+        "timestamp":    _telemetry_timestamp(payload.get("timestamp")),
+        "motor_state":  payload.get("motor_state", "UNKNOWN"),
         "accel_x":      vib.get("accel_x"),
         "accel_y":      vib.get("accel_y"),
         "accel_z":      vib.get("accel_z"),
@@ -193,6 +211,19 @@ def _handle_breach_message(payload: dict[str, Any]) -> None:
     result = vision_engine.inspect(worker_id=worker_id, device_id=device_id)
     compliant = result["compliant"]
     snapshot  = result.get("snapshot_path")
+
+    if compliant is None:
+        # Vision unavailable (no Roboflow credentials / no model).
+        # Do NOT invent a verdict and do NOT lock the machine on a guess.
+        print(
+            f"[Vision] Inspection unavailable for {worker_id} "
+            f"({result.get('label')}); interlock decision skipped."
+        )
+        store.set_machine_state(device_id, {
+            "proximity_breach_active": True,
+            "active_worker_id": worker_id,
+        })
+        return
 
     if not compliant:
         # 4a. Helmet violation → LOCKOUT pipeline
