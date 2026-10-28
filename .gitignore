@@ -4,6 +4,26 @@
 *.map
 build/
 .pio/
-# OS
+
+# Companion subsystems & monorepo workspaces
+armor-backend/
+armor-mobile/
+MachinoCare/
+machinocare-iot-predictive-maintenance/
+ARMOR_*.md
+.run/
+data/
+**/data/
+node_modules/
+**/node_modules/
+__pycache__/
+**/__pycache__/
+.venv/
+**/venv/
+*.db
+*.sqlite3
+
+# OS & Editor
 .DS_Store
 Thumbs.db
+.idea/
