@@ -8,6 +8,8 @@ See `docs/` for the merged build spec, roadmap, and architecture.
 ```
 armor/
 ├── docs/                       # Specs (single source of truth: "ARMOR Merged Build Spec.md")
+│   ├── hardware-pinout.md      # Authoritative ESP32 pinout (also on `hardware` branch)
+│   └── data-streaming.md       # MQTT/HTTP streaming spec (also on `hardware` branch)
 ├── armor-backend/              # FastAPI gateway + SQLite + Streamlit dashboard
 │   ├── backend/                # FastAPI app, storage, vision engine, models
 │   ├── dashboard/app.py        # Streamlit Operator Control Room

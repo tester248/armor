@@ -26,7 +26,7 @@
 
 ## 2. System in one paragraph
 
-MachinoCare 1.0 was passive monitoring (RS-555 motor, INA219 current/voltage, DS18B20 temperature, ADXL345 vibration, ESP32 node, Streamlit dashboard). MachinoCare 2.0 adds an active safety cell: a wearable ESP32 badge broadcasts ESP-NOW beacons; the machine ESP32 node smooths the measured RSSI (EMA, α = 0.35) and, at the calibrated 1.5 m threshold (nominal −65 dBm — calibrate at the venue, do not trust the number blindly), sends a wake-up to the FastAPI backend; the backend runs YOLOv8n PPE detection on the laptop webcam frame inside the ROI tripwire polygon; if hard hat or vest is missing, the backend sends MQTT LOCKOUT and the machine node (Core 1) pulls the L298N Enable pin (GPIO 23) LOW, captures a snapshot, and — when internet is available — sends a Telegram alert to the manager.
+MachinoCare 1.0 was passive monitoring (RS-555 motor, INA219 current/voltage, DS18B20 temperature, ADXL345 vibration, ESP32 node, Streamlit dashboard). MachinoCare 2.0 adds an active safety cell: a wearable ESP32 badge broadcasts ESP-NOW beacons; the machine ESP32 node smooths the measured RSSI (EMA, α = 0.35) and, at the calibrated 1.5 m threshold (nominal −65 dBm — calibrate at the venue, do not trust the number blindly), sends a wake-up to the FastAPI backend; the backend runs YOLOv8n PPE detection on the laptop webcam frame inside the ROI tripwire polygon; if hard hat or vest is missing, the backend sends MQTT LOCKOUT and the machine node (Core 1) cuts 12 V via the relay (GPIO 32, active-LOW) and pulls L298N ENA (GPIO 25) LOW, captures a snapshot, and - when internet is available - sends a Telegram alert to the manager. (Authoritative pinout: docs/hardware-pinout.md)
 
 ## 3. Finite state machine (corrected)
 
@@ -57,7 +57,7 @@ NORMAL ── smoothed RSSI ≥ −65 dBm ──► PROXIMITY_ALERT ── camer
 ## 5. Firmware split (corrected)
 
 - **Core 0 — Sensor acquisition:** ADXL345 (SPI Mode 3), INA219 (I2C), DS18B20 (1-Wire), 100 Hz sampling loop, SPI mutex, SPI auto-recovery (re-init bus, CS HIGH, rewrite register 0x2D = 0x08). Core 0 does NOT touch the Enable pin.
-- **Core 1 — Network & interlock:** ESP-NOW beacon reception + RSSI measurement/EMA, MQTT listener on `machinocare/v1/devices/{deviceId}/interlock` (QoS 1), WebSocket telemetry. On LOCKOUT: set `interlock_engaged`, `digitalWrite(L298N_ENABLE_PIN, LOW)` — GPIO 23, Enable HIGH at boot.
+- **Core 1 — Network & interlock:** ESP-NOW beacon reception + RSSI measurement/EMA, MQTT listener on `machinocare/v1/devices/{deviceId}/interlock` (QoS 1), WebSocket telemetry. On LOCKOUT: set `interlock_engaged`, cut 12 V relay (GPIO 32, active-LOW) + `digitalWrite(ENA, LOW)` (GPIO 25). ENA HIGH / relay HIGH at boot. (See docs/hardware-pinout.md)
 - Badge: ESP-NOW beacons only (`sender_mac`, `badge_id`, `sequence_num`, `battery_voltage`); buzzer on threshold breach / unacknowledged breach. No `raw_rssi` in the badge packet.
 
 ## 6. Contracts (single versions — delete all other spellings)
