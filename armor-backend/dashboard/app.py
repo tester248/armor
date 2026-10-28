@@ -37,7 +37,7 @@ SNAPSHOTS_DIR = Path(os.getenv("SNAPSHOT_DIR", "data/snapshots"))
 # ── Page Configuration ────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="ARMOR // Operator Control Room",
-    page_icon="🛡️",
+    page_icon=":material/shield:",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -348,10 +348,47 @@ st.markdown(
     ::-webkit-scrollbar-thumb { background: rgba(6, 182, 212, 0.3); border-radius: 3px; }
     ::-webkit-scrollbar-thumb:hover { background: rgba(6, 182, 212, 0.5); }
 
+    /* Icon styling */
+    .armor-icon {
+        display: inline-block;
+        vertical-align: middle;
+        flex-shrink: 0;
+    }
+
     </style>
     """,
     unsafe_allow_html=True,
 )
+
+# ── Modern SVG Icon System ────────────────────────────────────────────────────
+def icon_svg(name: str, color: str = "currentColor", size: int = 18, stroke_width: float = 2.0) -> str:
+    """Returns crisp inline SVG for industrial UI icons (Lucide/Feather standard)."""
+    icons = {
+        "shield": '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
+        "shield_check": '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/>',
+        "shield_alert": '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/>',
+        "siren": '<path d="M7 18v-6a5 5 0 1 1 10 0v6"/><path d="M5 21a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-1a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2z"/><path d="M21 12h1"/><path d="M18.5 4.5 19 4"/><path d="M2 12h1"/><path d="M12 2v1"/><path d="m4.929 4.929.707.707"/><path d="M12 12v6"/>',
+        "alert_triangle": '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
+        "zap": '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
+        "video": '<path d="m22 8-6 4 6 4V8Z"/><rect width="14" height="12" x="2" y="6" rx="2" ry="2"/>',
+        "activity": '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+        "trending_up": '<polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/>',
+        "clipboard_check": '<rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/>',
+        "badge": '<rect width="18" height="13" x="3" y="6" rx="2"/><circle cx="8.5" cy="12.5" r="2.5"/><path d="M14 11h3"/><path d="M14 14h3"/><path d="M10 2v4"/><path d="M14 2v4"/>',
+        "lock": '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+        "lock_open": '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>',
+        "check_circle": '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
+        "x_circle": '<circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>',
+        "refresh": '<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.85.83 6.72 2.24L21 8"/><path d="M21 3v5h-5"/>',
+        "walk": '<circle cx="13.5" cy="4.5" r="2.5"/><path d="m8 22 4-11 3 3v8"/><path d="M18 11.5 14 8l-3 2-4-2"/>',
+    }
+    inner = icons.get(name, "")
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" '
+        f'fill="none" stroke="{color}" stroke-width="{stroke_width}" stroke-linecap="round" stroke-linejoin="round" '
+        f'class="armor-icon" style="vertical-align: middle; display: inline-block;">{inner}</svg>'
+    )
+
 
 # ── Resilient Fast API Helpers ────────────────────────────────────────────────
 def api_get(endpoint: str, params: dict | None = None) -> Any:
@@ -379,7 +416,15 @@ backend_online = health is not None and health.get("status") == "ok"
 
 # ── Sidebar Controls ──────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("### 🛡️ ARMOR COMMAND")
+    st.markdown(
+        f"""
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:4px;">
+            {icon_svg('shield', color='#06b6d4', size=24)}
+            <span style="font-family:'Space Grotesk',sans-serif; font-size:1.25rem; font-weight:700; color:#ffffff; letter-spacing:0.02em;">ARMOR COMMAND</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     st.caption("Active Real-Time Machine & Operator Response")
     st.markdown("---")
 
@@ -401,9 +446,17 @@ with st.sidebar:
         st.caption("Start backend in terminal:<br>`python -m uvicorn --app-dir armor-backend backend.main:app --port 8000`", unsafe_allow_html=True)
 
     st.markdown("---")
-    st.markdown("#### ⚡ Quick Simulation Triggers")
+    st.markdown(
+        f"""
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+            {icon_svg('zap', color='#f59e0b', size=16)}
+            <span style="font-family:'Space Grotesk',sans-serif; font-size:0.95rem; font-weight:700; color:#ffffff;">Quick Simulation Triggers</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    if st.button("🚶 Simulate Proximity Breach (<1.5m)", use_container_width=True, type="secondary", disabled=not backend_online):
+    if st.button("Simulate Proximity Breach (<1.5m)", icon=":material/directions_walk:", use_container_width=True, type="secondary", disabled=not backend_online):
         code, resp = api_post(
             "/api/v1/breach",
             json_data={
@@ -415,12 +468,20 @@ with st.sidebar:
             },
         )
         if code in (200, 202):
-            st.toast("🚨 Proximity breach event sent! Vision inspection triggered.", icon="⚠️")
+            st.toast("Proximity breach event sent! Vision inspection triggered.", icon=":material/warning:")
         else:
             st.error(f"Failed to post breach: {resp}")
 
     st.markdown("---")
-    st.markdown("#### 🪪 Authorized Smart Badges")
+    st.markdown(
+        f"""
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+            {icon_svg('badge', color='#06b6d4', size=16)}
+            <span style="font-family:'Space Grotesk',sans-serif; font-size:0.95rem; font-weight:700; color:#ffffff;">Authorized Smart Badges</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     if backend_online:
         workers_data = api_get("/api/v1/workers")
         if workers_data and "badges" in workers_data:
@@ -479,10 +540,10 @@ if not backend_online:
         f"""
         <div class="alert-banner-offline">
             <div>
-                <span style="font-size: 1.1rem; font-weight: 700; color: #ffffff;">
-                    ⚠️ FASTAPI GATEWAY OFFLINE (PORT 8000)
-                </span><br>
-                <span style="font-size: 0.85rem; color: #cbd5e1;">
+                <span style="font-size: 1.1rem; font-weight: 700; color: #ffffff; display: flex; align-items: center; gap: 8px;">
+                    {icon_svg('alert_triangle', color='#94a3b8', size=20)} FASTAPI GATEWAY OFFLINE (PORT 8000)
+                </span>
+                <span style="font-size: 0.85rem; color: #cbd5e1; margin-top: 4px; display: block;">
                     Dashboard is in preview mode. Start backend: <code>python -m uvicorn --app-dir armor-backend backend.main:app --reload --port 8000</code>
                 </span>
             </div>
@@ -498,10 +559,10 @@ elif interlock_active:
         f"""
         <div class="alert-banner-lockout">
             <div>
-                <span style="font-size: 1.3rem; font-weight: 800; color: #ffffff; display: flex; align-items: center; gap: 10px;">
-                    🚨 EMERGENCY MOTOR LOCKOUT ACTIVE — SAFETY INTERLOCK ENGAGED
+                <span style="font-size: 1.25rem; font-weight: 800; color: #ffffff; display: flex; align-items: center; gap: 10px;">
+                    {icon_svg('siren', color='#ef4444', size=24)} EMERGENCY MOTOR LOCKOUT ACTIVE — SAFETY INTERLOCK ENGAGED
                 </span>
-                <span style="font-size: 0.85rem; color: #fecaca;">
+                <span style="font-size: 0.85rem; color: #fecaca; margin-top: 4px; display: block;">
                     Cell <b>{device_id}</b> power cut. L298N driver Enable pin (GPIO 14) pulled LOW. Worker: <b>{active_worker or 'UNKNOWN'}</b>.
                 </span>
             </div>
@@ -517,10 +578,10 @@ elif proximity_breach:
         f"""
         <div class="alert-banner-breach">
             <div>
-                <span style="font-size: 1.2rem; font-weight: 700; color: #ffffff;">
-                    ⚠️ RESTRICTED ZONE PROXIMITY BREACH DETECTED
-                </span><br>
-                <span style="font-size: 0.85rem; color: #fef3c7;">
+                <span style="font-size: 1.15rem; font-weight: 700; color: #ffffff; display: flex; align-items: center; gap: 8px;">
+                    {icon_svg('alert_triangle', color='#f59e0b', size=22)} RESTRICTED ZONE PROXIMITY BREACH DETECTED
+                </span>
+                <span style="font-size: 0.85rem; color: #fef3c7; margin-top: 4px; display: block;">
                     Worker <b>{active_worker or 'UNKNOWN'}</b> inside 1.5m perimeter. Camera inspection active.
                 </span>
             </div>
@@ -536,10 +597,10 @@ else:
         f"""
         <div class="alert-banner-normal">
             <div>
-                <span style="font-size: 1.15rem; font-weight: 700; color: #ffffff;">
-                    🛡️ SAFETY CELL ARMED & NOMINAL
-                </span><br>
-                <span style="font-size: 0.85rem; color: #a7f3d0;">
+                <span style="font-size: 1.15rem; font-weight: 700; color: #ffffff; display: flex; align-items: center; gap: 8px;">
+                    {icon_svg('shield_check', color='#10b981', size=22)} SAFETY CELL ARMED & NOMINAL
+                </span>
+                <span style="font-size: 0.85rem; color: #a7f3d0; margin-top: 4px; display: block;">
                     Machine <b>{device_id}</b> running normally. Perimeter clear. L298N Enable HIGH.
                 </span>
             </div>
@@ -573,12 +634,19 @@ with c1:
 with c2:
     vibe_warn = current_rms > 0.15
     hud_class = "hud-red" if vibe_warn else "hud-green"
+    vibe_sub = (
+        f'<span style="color:#ef4444; display:inline-flex; align-items:center; gap:4px;">'
+        f'{icon_svg("alert_triangle", color="#ef4444", size=13)} Vibration Warning (&gt;0.15g)</span>'
+        if vibe_warn else
+        f'<span style="color:#10b981; display:inline-flex; align-items:center; gap:4px;">'
+        f'{icon_svg("check_circle", color="#10b981", size=13)} Nominal baseline (&lt;0.10g)</span>'
+    )
     st.markdown(
         f"""
         <div class="hud-card {hud_class}">
             <div class="hud-title">ADXL345 Vibration RMS</div>
             <div class="hud-value">{current_rms:.3f} <span style="font-size:1rem; font-weight:400; color:#94a3b8;">g</span></div>
-            <div class="hud-sub">{'⚠️ Vibration Warning (>0.15g)' if vibe_warn else 'Nominal baseline (<0.10g)'}</div>
+            <div class="hud-sub">{vibe_sub}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -623,9 +691,10 @@ left_col, right_col = st.columns([1, 1], gap="medium")
 # ─────────────────────────────────────────────────────────────────────────────
 with left_col:
     st.markdown(
-        """
+        f"""
         <div class="armor-header">
-            📹 Edge Vision Safety Inspection
+            {icon_svg('video', color='#06b6d4', size=22)}
+            <span>Edge Vision Safety Inspection</span>
         </div>
         """,
         unsafe_allow_html=True,
@@ -650,9 +719,11 @@ with left_col:
         )
     else:
         st.markdown(
-            """
+            f"""
             <div class="video-frame-container" style="height: 380px; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:20px;">
-                <div style="font-size: 2.5rem; margin-bottom: 10px;">📹</div>
+                <div style="margin-bottom: 12px; opacity: 0.7;">
+                    {icon_svg('video', color='#94a3b8', size=44)}
+                </div>
                 <div style="font-weight: 700; font-size: 1.1rem; color: #ffffff;">Camera Stream Offline</div>
                 <div style="color: #94a3b8; font-size: 0.85rem; max-width: 380px; margin-top: 6px;">
                     Start the FastAPI backend server on port 8000 to connect to the live 30fps webcam & helmet segmentation stream.
@@ -666,7 +737,7 @@ with left_col:
     btn_col1, btn_col2 = st.columns(2)
 
     with btn_col1:
-        if st.button("⚡ EMERGENCY LOCKOUT", use_container_width=True, type="primary", disabled=not backend_online):
+        if st.button("EMERGENCY LOCKOUT", icon=":material/bolt:", use_container_width=True, type="primary", disabled=not backend_online):
             code, resp = api_post(
                 "/api/v1/interlock",
                 json_data={
@@ -678,12 +749,12 @@ with left_col:
                 params={"device_id": device_id},
             )
             if code == 200:
-                st.toast("🛑 EMERGENCY LOCKOUT ENGAGED!", icon="🚨")
+                st.toast("EMERGENCY LOCKOUT ENGAGED!", icon=":material/dangerous:")
                 time.sleep(0.3)
                 st.rerun()
 
     with btn_col2:
-        if st.button("🔄 RESET INTERLOCK", use_container_width=True, disabled=not backend_online):
+        if st.button("RESET INTERLOCK", icon=":material/restart_alt:", use_container_width=True, disabled=not backend_online):
             code, resp = api_post(
                 "/api/v1/interlock",
                 json_data={
@@ -695,7 +766,7 @@ with left_col:
                 params={"device_id": device_id},
             )
             if code == 200:
-                st.toast("✅ Cell interlock reset to RUNNING.", icon="🛡️")
+                st.toast("Cell interlock reset to RUNNING.", icon=":material/check_circle:")
                 time.sleep(0.3)
                 st.rerun()
 
@@ -705,9 +776,10 @@ with left_col:
 # ─────────────────────────────────────────────────────────────────────────────
 with right_col:
     st.markdown(
-        """
+        f"""
         <div class="armor-header">
-            📈 Predictive Maintenance Telemetry
+            {icon_svg('trending_up', color='#06b6d4', size=22)}
+            <span>Predictive Maintenance Telemetry</span>
         </div>
         """,
         unsafe_allow_html=True,
@@ -846,9 +918,10 @@ with right_col:
 # ── Full-Width Section: Safety Incident Audit Log & Snapshot Evidence Inspector ───
 st.markdown("<br>", unsafe_allow_html=True)
 st.markdown(
-    """
+    f"""
     <div class="armor-header">
-        📋 Safety Incident Audit Log & Evidence Inspector
+        {icon_svg('clipboard_check', color='#06b6d4', size=22)}
+        <span>Safety Incident Audit Log & Evidence Inspector</span>
     </div>
     """,
     unsafe_allow_html=True,
@@ -867,8 +940,8 @@ if incidents:
                 "Worker ID": inc.get("worker_id") or "UNKNOWN",
                 "Violation": inc.get("violation_type"),
                 "Compliance": f"{float(inc.get('compliance_ratio') or 0):.0%}",
-                "Lockout": "⚡ Issued" if inc.get("interlock_issued") else "No",
-                "Status": "✅ Resolved" if inc.get("resolved") else "🚨 OPEN",
+                "Lockout": "Issued" if inc.get("interlock_issued") else "No",
+                "Status": "Resolved" if inc.get("resolved") else "OPEN",
                 "Time": inc.get("created_at", "")[:19].replace("T", " "),
             })
         df_inc = pd.DataFrame(table_rows)
@@ -903,7 +976,12 @@ if incidents:
                 st.warning(f"Snapshot file `{snap_path}` not found on disk.")
 
             if not selected_incident.get("resolved"):
-                if st.button(f"🔓 Authorize Safety Reset for Incident {selected_id[:8]}", use_container_width=True, disabled=not backend_online):
+                if st.button(
+                    f"Authorize Safety Reset for Incident {selected_id[:8]}",
+                    icon=":material/lock_open:",
+                    use_container_width=True,
+                    disabled=not backend_online,
+                ):
                     code, resp = api_post(
                         f"/api/v1/interlock/reset/{selected_id}",
                         params={"reset_by": "Plant_Manager_Console", "device_id": device_id},
