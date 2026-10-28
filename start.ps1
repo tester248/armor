@@ -42,7 +42,7 @@ $candidates = @(
     "python"
 )
 $probeScript = Join-Path $RunDir "probe_deps.py"
-Set-Content -Path $probeScript -Value "import uvicorn, fastapi, streamlit" -Encoding ascii
+Set-Content -Path $probeScript -Value "import uvicorn, fastapi, streamlit, ultralytics" -Encoding ascii
 
 $pythonExe = $null
 foreach ($cand in $candidates) {

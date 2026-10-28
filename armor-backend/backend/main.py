@@ -523,6 +523,40 @@ def vision_snapshot(filename: str):
     return FileResponse(path)
 
 
+@app.get("/api/v1/vision/state", tags=["Vision"])
+def vision_state():
+    """Return live Vision AI state: feed-freeze status, person detection, and helmet verdict."""
+    if vision_engine is None:
+        raise HTTPException(status_code=503, detail="Vision engine not available.")
+    return vision_engine.get_state()
+
+
+@app.post("/api/v1/vision/unfreeze", tags=["Vision"])
+def vision_unfreeze():
+    """Manually unfreeze the camera stream back to live scanning mode."""
+    if vision_engine is None:
+        raise HTTPException(status_code=503, detail="Vision engine not available.")
+    vision_engine.unfreeze()
+    return {"status": "unfrozen", "vision_state": "SCANNING"}
+
+
+@app.get("/api/v1/vision/auto-freeze", tags=["Vision"])
+def vision_get_auto_freeze():
+    """Get current auto-freeze state."""
+    if vision_engine is None:
+        raise HTTPException(status_code=503, detail="Vision engine not available.")
+    return {"auto_freeze_enabled": vision_engine.get_state().get("auto_freeze_enabled", False)}
+
+
+@app.post("/api/v1/vision/auto-freeze", tags=["Vision"])
+def vision_set_auto_freeze(enabled: bool = True):
+    """Enable or disable automatic feed-freezing on person detection."""
+    if vision_engine is None:
+        raise HTTPException(status_code=503, detail="Vision engine not available.")
+    vision_engine.set_auto_freeze(enabled)
+    return {"status": "ok", "auto_freeze_enabled": enabled}
+
+
 # Health
 # ══════════════════════════════════════════════════════════════════════════════
 @app.get("/api/v1/health", tags=["System"])

@@ -1042,14 +1042,14 @@ def _build_df(samples):
         return None
     df = pd.DataFrame(samples)
     if "ts" in df.columns:
-        ts_dt = pd.to_datetime(df["ts"], errors="coerce")
+        ts_dt = pd.to_datetime(df["ts"], errors="coerce", utc=True)
         if ts_dt.isna().all() or ts_dt.isna().sum() > len(df) // 2:
             try:
                 numeric_ts = pd.to_numeric(df["ts"], errors="coerce")
                 if numeric_ts.max() < 1e9:
-                    ts_dt = pd.to_datetime(numeric_ts, unit="s", errors="coerce")
+                    ts_dt = pd.to_datetime(numeric_ts, unit="s", errors="coerce", utc=True)
                 else:
-                    ts_dt = pd.to_datetime(numeric_ts, unit="ms", errors="coerce")
+                    ts_dt = pd.to_datetime(numeric_ts, unit="ms", errors="coerce", utc=True)
             except Exception:
                 ts_dt = pd.date_range(end=datetime.now(timezone.utc), periods=len(df), freq="1s")
         df["ts_dt"] = ts_dt
@@ -1227,10 +1227,71 @@ if backend_online:
 
         with cam_col:
             stream_url = f"{API_BASE_URL}/video/stream"
+
+            # Query live vision engine state
+            v_state = api_get("/api/v1/vision/state") or {}
+            is_frozen = v_state.get("is_frozen", False)
+            person_present = v_state.get("person_present", False)
+            person_count = v_state.get("person_count", 0)
+            auto_freeze = v_state.get("auto_freeze_enabled", False)
+            last_res = v_state.get("last_helmet_result") or {}
+            helmet_comp = last_res.get("compliant")
+            helmet_ratio = last_res.get("compliance_ratio", 0.0)
+            helmet_label = last_res.get("label", "")
+
+            cam_badge = "status-standby" if is_frozen else "status-online"
+            cam_text = "⏸ FEED FROZEN (INSPECTING)" if is_frozen else "● LIVE STREAM"
+
+            person_badge = "status-active" if person_present else ""
+            person_text = f"● PERSON IN FRAME ({person_count})" if person_present else "● SCANNING"
+
+            if helmet_comp is True:
+                helmet_badge = "status-online"
+                helmet_text = f"✅ HELMET OK ({helmet_ratio:.0%})"
+            elif helmet_comp is False and helmet_label == "HELMET_FAIL":
+                helmet_badge = "status-offline"
+                helmet_text = "🚨 NO HELMET (LOCKOUT)"
+            else:
+                helmet_badge = ""
+                helmet_text = "PPE STANDBY"
+
+            auto_badge = "status-online" if auto_freeze else "status-standby"
+            auto_text = "⚡ AUTO-FREEZE ON" if auto_freeze else "⏸ AUTO-FREEZE OFF"
+
+            st.markdown(
+                f"""
+                <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px;">
+                    <span class="status-pill {cam_badge}"><span class="status-dot"></span><b>{cam_text}</b></span>
+                    <span class="status-pill {person_badge}"><span class="status-dot"></span><b>{person_text}</b></span>
+                    <span class="status-pill {helmet_badge}"><span class="status-dot"></span><b>{helmet_text}</b></span>
+                    <span class="status-pill {auto_badge}"><span class="status-dot"></span><b>{auto_text}</b></span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            # Auto-freeze toggle row
+            tog_c1, tog_c2 = st.columns([1.5, 1])
+            with tog_c1:
+                new_auto = st.toggle(
+                    "⚡ Auto-Freeze Helmet Check",
+                    value=auto_freeze,
+                    key="toggle_auto_freeze_cam",
+                    help="When enabled, detecting a person freezes the feed once to check helmet compliance. When disabled, the camera streams continuously at 30 fps without freezing.",
+                )
+                if new_auto != auto_freeze:
+                    api_post("/api/v1/vision/auto-freeze", params={"enabled": new_auto})
+                    st.rerun()
+            with tog_c2:
+                if is_frozen:
+                    if st.button("▶ Unfreeze Stream", use_container_width=True, key="btn_quick_unfreeze_top"):
+                        api_post("/api/v1/vision/unfreeze")
+                        st.rerun()
+
             st.markdown(
                 f"""
                 <div class="video-frame-container" style="height: 420px; aspect-ratio: 4/3;">
-                    <div class="live-badge">LIVE AI STREAM</div>
+                    <div class="live-badge">{'⏸ FROZEN INSPECTION' if is_frozen else 'LIVE AI STREAM'}</div>
                     <iframe
                         src="{stream_url}"
                         width="100%"
@@ -1242,6 +1303,16 @@ if backend_online:
                 """,
                 unsafe_allow_html=True,
             )
+
+            v_btn_c1, v_btn_c2 = st.columns([1, 1])
+            with v_btn_c1:
+                if st.button("📸 Inspect Now (Manual Check)", use_container_width=True, key="btn_quick_inspect"):
+                    api_post("/api/v1/vision/inspect", params={"worker_id": "WORKER_EMP_402", "device_id": device_id})
+                    st.rerun()
+            with v_btn_c2:
+                if st.button("▶ Resume Live Feed", use_container_width=True, key="btn_quick_unfreeze", disabled=not is_frozen):
+                    api_post("/api/v1/vision/unfreeze")
+                    st.rerun()
 
         with chart_col:
             _render_charts(samples, device_id)
