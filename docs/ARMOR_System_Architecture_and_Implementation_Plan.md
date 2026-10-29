@@ -115,14 +115,14 @@ graph LR
 
 ```mermaid
 graph TD
-    subgraph Cell [Physical cell]
+    subgraph Cell["Physical cell"]
         A[ESP32 badge] -- ESP-NOW --> B[ESP32 machine node]
         B -- SPI --> C[ADXL345]
         B -- I2C --> D[INA219]
         B -- 1-Wire --> E[DS18B20]
         B -- relay 32 + ENA 25 --> F[L298N + RS-555]
     end
-    subgraph Host [Gateway host]
+    subgraph Host["Gateway host"]
         G[FastAPI :8000]
         H[Streamlit :8501]
         I[Twin /twin]

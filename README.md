@@ -55,14 +55,14 @@ armor/                          # main branch — gateway, dashboard, twin, docs
 
 ```mermaid
 graph LR
-    subgraph Cell [Safety cell]
+    subgraph Cell["Safety cell"]
         B[ESP32 badge<br/>ESP-NOW beacon]
         N[ESP32 machine node<br/>ADXL345 · INA219 · DS18B20<br/>relay 32 + ENA 25]
         C[Laptop webcam]
         M[RS-555 12 V motor]
     end
 
-    subgraph Gateway [FastAPI gateway :8000]
+    subgraph Gateway["FastAPI gateway :8000"]
         API[REST + WebSocket]
         DB[(SQLite)]
         ML[Anomaly engine<br/>IsolationForest]
@@ -70,14 +70,14 @@ graph LR
         LLM[Groq advisor]
     end
 
-    subgraph Rooms [Control rooms]
+    subgraph Rooms["Control rooms"]
         ST[Streamlit :8501]
         TW[3D twin /twin]
         APP[Mobile app<br/>Expo]
     end
 
     B -->|RSSI measured at node| N
-    N -->|telemetry 1 Hz (MQTT or HTTP)| API
+    N -->|"telemetry 1 Hz (MQTT or HTTP)"| API
     N -->|proximity breach| API
     N --> M
     C --> VIS
