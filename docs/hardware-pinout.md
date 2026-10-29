@@ -50,7 +50,10 @@ ADXL345 MOSI (GPIO 23). The authoritative design uses **ENA = GPIO 25** (PWM) pl
    regardless of ENA. This is the safety-critical path; target < 50 ms GPIO action.
 2. **Soft (ENA, GPIO 25):** PWM driven LOW to stop motor drive.
 
-On `LOCKOUT`: relay LOW + ENA LOW. On `RESET`: relay HIGH + resume PWM.
+On `LOCKOUT`: relay LOW + ENA LOW. On `RESET`: relay HIGH (drive stays stopped until a
+`START` is received). `START`/`STOP` arrive on the same topic; the firmware should only
+run the motor when `motor_requested && !interlock`. `BENCH_ON` / `BENCH_OFF` also arrive
+there and suppress ESP-NOW proximity lockouts during calibration.
 
 ## 3. Power & ground
 - 3.3 V rail: INA219 VCC, DS18B20 VDD, ADXL345 VCC, 4.7 kΩ pull-up (leg 2).

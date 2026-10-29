@@ -1,5 +1,22 @@
 # ARMOR: 24-Hour Hackathon Work Division & Execution Roadmap
 
+> **Status (2026-10-29): this plan was executed.** The sprint table below is kept as
+> the historical division of work. What actually shipped, and where it differs from
+> the plan:
+>
+> | Planned | Shipped |
+> |---|---|
+> | YOLO instance segmentation masks | Roboflow workflow (RF-DETR + SAM 3) with person-gated **feed freeze**, dwell countdown and a local CV fallback |
+> | MQTT topics `armor/machine01/*` | `machinocare/v1/devices/{id}/telemetry` and `…/interlock` |
+> | Enable pin LOW on lockout | Relay GPIO 32 (hard 12 V cut) **and** ENA GPIO 25 LOW |
+> | Expo app as stretch | Shipped: 5-tab Expo app on the `armor-app` branch, plus a web build for LAN testers |
+> | Twin as "simple primitives" | Shipped: full three.js machine model with state-driven animation |
+> | Streamlit only | Streamlit + 3D twin + mobile app, all on one `/ws/live` feed |
+> | — (not planned) | Multi-modal IsolationForest anomaly engine, 3 anomalous windows in 5 s → auto lockout, Groq advisory, bench mode, START/STOP motor control |
+>
+> See `README.md` for run instructions and `docs/ARMOR_System_Architecture_and_Implementation_Plan.md`
+> for the as-built architecture.
+
 ---
 
 ### 1. Team Roles & Responsibilities
@@ -36,14 +53,16 @@ To maximize speed and prevent blocking dependencies during a 24-hour sprint, the
 #### Software Team
 * **SW Member 1 (Vision AI & Edge Analytics Specialist)**:
   * OpenCV webcam frame ingestion pipeline.
-  * YOLO instance segmentation model loader (motorcycle helmet dataset).
-  * Head Region of Interest (ROI) extraction and polygon mask compliance calculation.
-  * JPEG snapshot generation with color-coded segmentation mask overlays.
+  * Person-gated **feed freeze** with dwell countdown, then Roboflow RF-DETR + SAM 3
+    helmet/PPE check (local CV fallback).
+  * Head/PPE compliance rule and annotated snapshot generation.
 * **SW Member 2 (Backend, Dashboard & Mobile App Lead)**:
   * FastAPI server with Eclipse Mosquitto MQTT broker and WebSocket endpoints.
   * SQLite database models for telemetry, incidents, and worker logs.
-  * Streamlit Web Operator Control Room (`dashboard/app.py`).
-  * React Native Expo mobile app for floor managers (live overview, interlock control, push notifications).
+  * Streamlit Web Operator Control Room (`dashboard/app.py`) and the three.js digital
+    twin (`static/twin.html`).
+  * React Native Expo mobile app for floor managers (five tabs, on the `armor-app`
+    branch), shipped as a web build for LAN testers.
   * Telegram bot integration for instant alert dispatching.
 
 ---
@@ -79,6 +98,9 @@ To maximize speed and prevent blocking dependencies during a 24-hour sprint, the
 ---
 
 ### 4. 2-Minute Judge Presentation Script & Live Playbook
+
+> The wording below is the original pitch. For the as-built demo beats (twin states,
+> app tabs, anomaly gate), use `docs/ARMOR Merged Build Spec.md` §9 instead.
 
 * **[0:00 - 0:30] The Core Pitch & Machine Health**:
   * *Presenter*: "Judges, Industry 4.0 dashboards only show you graphs while accidents happen. Meets ARMOR—an active, closed-loop cyber-physical safety cell. On the table, our RS-555 motor is running normally, streaming vibration, current, and temperature data to our Streamlit dashboard and React Native manager app."
