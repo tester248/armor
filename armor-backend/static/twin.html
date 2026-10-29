@@ -2,52 +2,414 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>ARMOR 3D Digital Twin</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ARMOR // 3D Digital Twin</title>
 <style>
+  :root {
+    --bg: #070b11;
+    --panel: rgba(13, 20, 28, 0.88);
+    --panel-solid: #111a23;
+    --line: rgba(111, 183, 255, 0.18);
+    --line-strong: rgba(111, 183, 255, 0.34);
+    --ink: #e8eff5;
+    --muted: #a3b4c2;
+    --faint: #71879a;
+    --primary: #6fb7ff;
+    --ok: #45d48a;
+    --warn: #e3b341;
+    --bad: #ff6b6b;
+    --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    --mono: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  }
+
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: #0b0f19; color: #f8fafc; font-family: 'Inter', sans-serif; overflow: hidden; }
-  #canvas-container { width: 100vw; height: 100vh; }
-  #overlay {
-    position: absolute; top: 12px; left: 12px; z-index: 10;
-    background: rgba(18, 26, 43, 0.85); border: 1px solid rgba(56, 189, 248, 0.3);
-    border-radius: 10px; padding: 12px 16px; backdrop-filter: blur(12px);
-    font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;
+
+  html, body { height: 100%; }
+
+  body {
+    background:
+      radial-gradient(90% 80% at 50% 0%, #0d1722 0%, #070b11 58%, #050810 100%);
+    color: var(--ink);
+    font-family: var(--sans);
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
   }
-  #overlay .title { color: #06b6d4; font-weight: 700; margin-bottom: 6px; font-size: 0.9rem; }
-  #overlay .row { display: flex; justify-content: space-between; gap: 16px; margin: 2px 0; }
-  #overlay .label { color: #94a3b8; }
-  #overlay .value { color: #ffffff; font-weight: 600; }
-  #status-bar {
-    position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 10;
-    background: rgba(18, 26, 43, 0.85); border: 1px solid rgba(56, 189, 248, 0.3);
-    border-radius: 8px; padding: 8px 20px; font-family: 'JetBrains Mono', monospace;
-    font-size: 0.85rem; font-weight: 700; letter-spacing: 0.05em;
+
+  #stage { position: absolute; inset: 0; }
+  #stage canvas { display: block; }
+
+  /* ── HUD ─────────────────────────────────────────────────────────────── */
+  #hud {
+    position: absolute;
+    top: 14px;
+    left: 14px;
+    width: 284px;
+    padding: 12px 14px 13px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--panel);
+    backdrop-filter: blur(16px) saturate(120%);
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    font-family: var(--mono);
+    z-index: 10;
   }
-  #live-badge {
-    position: absolute; top: 12px; right: 12px; z-index: 10;
-    background: rgba(239, 68, 68, 0.9); color: white; font-family: 'JetBrains Mono', monospace;
-    font-size: 0.7rem; font-weight: 700; padding: 4px 10px; border-radius: 4px;
+
+  #hud header {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid rgba(111, 183, 255, 0.14);
+  }
+
+  .mark {
+    width: 22px;
+    height: 22px;
+    border-radius: 7px;
+    border: 1px solid rgba(111, 183, 255, 0.45);
+    background: linear-gradient(150deg, rgba(111, 183, 255, 0.32), rgba(111, 183, 255, 0.04));
+    display: grid;
+    place-items: center;
+    flex: none;
+  }
+  .mark::after {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 2px;
+    background: var(--primary);
+    box-shadow: 0 0 10px rgba(111, 183, 255, 0.9);
+  }
+
+  .titles { flex: 1; min-width: 0; line-height: 1.15; }
+  .titles strong { display: block; font-size: 12px; letter-spacing: 0.18em; font-weight: 700; }
+  .titles span {
+    display: block;
+    font-size: 9px;
+    letter-spacing: 0.06em;
+    color: var(--faint);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .link {
+    flex: none;
+    font-size: 8.5px;
+    letter-spacing: 0.14em;
+    padding: 3px 7px;
+    border-radius: 999px;
+    border: 1px solid rgba(163, 180, 194, 0.3);
+    color: var(--muted);
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .link::before {
+    content: "";
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: currentColor;
+    box-shadow: 0 0 8px currentColor;
+  }
+  .link[data-state="ok"] { color: var(--ok); border-color: rgba(69, 212, 138, 0.38); }
+  .link[data-state="warn"] { color: var(--warn); border-color: rgba(227, 179, 65, 0.38); }
+  .link[data-state="bad"] { color: var(--bad); border-color: rgba(255, 107, 107, 0.38); }
+
+  .headline {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 11px 0 9px;
+    border-bottom: 1px solid rgba(111, 183, 255, 0.1);
+  }
+  .headline .k {
+    font-size: 9px;
+    letter-spacing: 0.16em;
+    color: var(--faint);
+  }
+  .headline .v {
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    color: var(--ink);
+  }
+  .headline .v[data-state="ok"] { color: var(--ok); }
+  .headline .v[data-state="warn"] { color: var(--warn); }
+  .headline .v[data-state="bad"] { color: var(--bad); }
+
+  .rows { display: grid; gap: 6px; padding: 10px 0 11px; }
+  .row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 11.5px;
+  }
+  .row .k {
+    color: var(--faint);
     letter-spacing: 0.1em;
+    font-size: 9px;
+    text-transform: uppercase;
   }
-  .connected { color: #10b981; }
-  .disconnected { color: #ef4444; }
+  .row .v {
+    color: var(--ink);
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .row .v small { color: var(--faint); font-weight: 400; margin-left: 2px; }
+  .row .v[data-state="ok"] { color: var(--ok); }
+  .row .v[data-state="warn"] { color: var(--warn); }
+  .row .v[data-state="bad"] { color: var(--bad); }
+
+  .anom { padding-top: 2px; }
+  .anom .top {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    color: var(--faint);
+    margin-bottom: 5px;
+  }
+  .anom .top b {
+    font-size: 11.5px;
+    letter-spacing: 0.02em;
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+  .track {
+    height: 6px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.07);
+    overflow: hidden;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.5);
+  }
+  #anomFill {
+    height: 100%;
+    width: 0%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #45d48a, #8fe6b6);
+    transition: width 0.35s ease, background 0.35s ease;
+  }
+  #contrib {
+    margin-top: 6px;
+    font-size: 9px;
+    line-height: 1.4;
+    color: var(--faint);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .traceWrap {
+    margin-top: 10px;
+    padding-top: 9px;
+    border-top: 1px solid rgba(111, 183, 255, 0.12);
+  }
+  .traceWrap .cap {
+    display: flex;
+    justify-content: space-between;
+    font-size: 8px;
+    letter-spacing: 0.14em;
+    color: var(--faint);
+    margin-bottom: 4px;
+  }
+  #trace { width: 100%; height: 44px; display: block; }
+
+  /* ── Status bar ──────────────────────────────────────────────────────── */
+  #status {
+    position: absolute;
+    bottom: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10;
+    max-width: min(70%, 620px);
+    padding: 8px 18px;
+    border-radius: 999px;
+    border: 1px solid rgba(69, 212, 138, 0.4);
+    background: rgba(9, 40, 27, 0.72);
+    backdrop-filter: blur(12px);
+    color: var(--ok);
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+  }
+  #status[data-state="warn"] {
+    color: var(--warn);
+    border-color: rgba(227, 179, 65, 0.45);
+    background: rgba(45, 33, 4, 0.72);
+  }
+  #status[data-state="bad"] {
+    color: var(--bad);
+    border-color: rgba(255, 107, 107, 0.5);
+    background: rgba(48, 11, 11, 0.74);
+    animation: alarm 1.1s ease-in-out infinite;
+  }
+  @keyframes alarm {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(255, 107, 107, 0); }
+    50% { box-shadow: 0 0 22px 0 rgba(255, 107, 107, 0.35); }
+  }
+
+  /* ── Camera presets ──────────────────────────────────────────────────── */
+  #presets {
+    position: absolute;
+    right: 14px;
+    bottom: 14px;
+    z-index: 10;
+    display: flex;
+    gap: 6px;
+    padding: 5px;
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    backdrop-filter: blur(12px);
+  }
+  #presets button {
+    all: unset;
+    cursor: pointer;
+    padding: 6px 10px;
+    border-radius: 7px;
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.14em;
+    color: var(--faint);
+    border: 1px solid transparent;
+    transition: color 0.16s ease, background 0.16s ease, border-color 0.16s ease;
+  }
+  #presets button:hover { color: var(--ink); }
+  #presets button[aria-pressed="true"] {
+    color: var(--primary);
+    background: rgba(111, 183, 255, 0.12);
+    border-color: rgba(111, 183, 255, 0.42);
+  }
+  #presets button:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+
+  /* ── Boot / error ────────────────────────────────────────────────────── */
+  #boot {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    display: grid;
+    place-content: center;
+    gap: 10px;
+    justify-items: center;
+    background: radial-gradient(60% 60% at 50% 45%, #0d1722 0%, #070b11 70%);
+    font-family: var(--mono);
+    transition: opacity 0.45s ease;
+  }
+  #boot.gone { opacity: 0; pointer-events: none; }
+  #boot .ring {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    border: 2px solid rgba(111, 183, 255, 0.18);
+    border-top-color: var(--primary);
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #boot .label { font-size: 10px; letter-spacing: 0.22em; color: var(--muted); }
+  #boot .err {
+    max-width: 320px;
+    text-align: center;
+    font-size: 10.5px;
+    line-height: 1.6;
+    letter-spacing: 0.04em;
+    color: var(--warn);
+  }
+
+  @media (max-width: 760px), (max-height: 470px) {
+    #hud { width: 232px; padding: 10px 12px; }
+    .traceWrap { display: none; }
+    #status { font-size: 9.5px; padding: 7px 14px; max-width: 62%; }
+    #presets { top: 14px; bottom: auto; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    #status[data-state="bad"] { animation: none; }
+    #boot .ring { animation-duration: 3s; }
+  }
 </style>
 </head>
 <body>
-<div id="canvas-container"></div>
-<div id="overlay">
-  <div class="title">ARMOR DIGITAL TWIN</div>
-  <div class="row"><span class="label">Motor State</span><span class="value" id="motorState">--</span></div>
-  <div class="row"><span class="label">Interlock</span><span class="value" id="interlock">--</span></div>
-  <div class="row"><span class="label">Proximity</span><span class="value" id="proximity">--</span></div>
-  <div class="row"><span class="label">Worker</span><span class="value" id="worker">--</span></div>
-  <div class="row"><span class="label">Vibration</span><span class="value" id="vib">--</span></div>
-  <div class="row"><span class="label">Temperature</span><span class="value" id="temp">--</span></div>
-  <div class="row"><span class="label">Current</span><span class="value" id="current">--</span></div>
-  <div class="row"><span class="label">WS</span><span class="value" id="wsStatus">connecting...</span></div>
+<div id="stage"></div>
+
+<section id="hud" aria-label="Digital twin telemetry">
+  <header>
+    <span class="mark"></span>
+    <div class="titles">
+      <strong>ARMOR</strong>
+      <span id="dev">machino_node_01</span>
+    </div>
+    <span id="link" class="link" data-state="warn">LINK</span>
+  </header>
+
+  <div class="headline">
+    <span class="k">MOTOR</span>
+    <span class="v" id="motor" data-state="">--</span>
+  </div>
+
+  <div class="rows">
+    <div class="row"><span class="k">Interlock</span><span class="v" id="interlock">--</span></div>
+    <div class="row"><span class="k">Vicinity</span><span class="v" id="vicinity">--</span></div>
+    <div class="row"><span class="k">PPE gate</span><span class="v" id="ppe">--</span></div>
+    <div class="row"><span class="k">Vibration</span><span class="v" id="vib">--</span></div>
+    <div class="row"><span class="k">Current</span><span class="v" id="current">--</span></div>
+    <div class="row"><span class="k">Bus</span><span class="v" id="voltage">--</span></div>
+    <div class="row"><span class="k">Temperature</span><span class="v" id="temp">--</span></div>
+    <div class="row"><span class="k">Incidents</span><span class="v" id="incidents">--</span></div>
+  </div>
+
+  <div class="anom">
+    <div class="top"><span>ANOMALY SCORE</span><b id="anomPct">--</b></div>
+    <div class="track"><div id="anomFill"></div></div>
+    <div id="contrib">waiting for the first telemetry window</div>
+  </div>
+
+  <div class="traceWrap">
+    <div class="cap"><span>VIBRATION</span><span>TEMPERATURE</span></div>
+    <canvas id="trace"></canvas>
+  </div>
+</section>
+
+<div id="status" data-state="ok" aria-live="polite">SYSTEM NOMINAL</div>
+
+<div id="presets" role="group" aria-label="Camera presets">
+  <button type="button" data-preset="iso" aria-pressed="true">ISO</button>
+  <button type="button" data-preset="front" aria-pressed="false">FRONT</button>
+  <button type="button" data-preset="top" aria-pressed="false">TOP</button>
 </div>
-<div id="live-badge">3D TWIN</div>
-<div id="status-bar" style="background:rgba(16,185,129,0.2);border-color:#10b981;color:#10b981;">SYSTEM NOMINAL</div>
+
+<div id="boot">
+  <div class="ring"></div>
+  <div class="label">INITIALISING DIGITAL TWIN</div>
+  <div class="err" id="bootErr"></div>
+</div>
+
+<!-- Failsafe for a blocked CDN: the module below never runs if the import fails. -->
+<script>
+  window.__twinBooted = false;
+  setTimeout(function () {
+    if (!window.__twinBooted) {
+      var el = document.getElementById('bootErr');
+      if (el) {
+        el.textContent =
+          'Could not load the 3D engine from the CDN. Check the gateway internet connection, then reload.';
+      }
+    }
+  }, 9000);
+</script>
 
 <script type="importmap">
 {
@@ -57,245 +419,1043 @@
   }
 }
 </script>
+
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-// ---- Scene setup ----
-const container = document.getElementById('canvas-container');
+/* ──────────────────────────────────────────────────────────────────────────
+   ARMOR digital twin
+
+   Served by FastAPI at /twin and embedded in the Streamlit dashboard.
+   Query params:
+     device_id  machine node to follow          (default machino_node_01)
+     host       ws gateway override, "ip:port"  (default: the page origin)
+     demo       1 => scripted telemetry, no WS  (offline demos / screenshots)
+
+   Design intent: the machine body is the primary readout. Colour, spin,
+   brake, heat glow and beacon are all driven by /ws/live so an operator can
+   read the cell from across the room; the HUD carries the exact numbers.
+   ────────────────────────────────────────────────────────────────────────── */
+
+const PALETTE = {
+  bg: 0x070b11,
+  steel: 0x2b3846,
+  steelDark: 0x161f29,
+  castIron: 0x1b242e,
+  paint: 0x24435c,
+  chrome: 0x9fb2c4,
+  rubber: 0x0d141b,
+  primary: 0x6fb7ff,
+  ok: 0x45d48a,
+  warn: 0xe3b341,
+  bad: 0xff6b6b,
+};
+
+const params = new URLSearchParams(window.location.search);
+const deviceId = params.get('device_id') || 'machino_node_01';
+const hostOverride = params.get('host');
+const demoMode = params.get('demo') === '1';
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+document.getElementById('dev').textContent = deviceId;
+
+/* ── Renderer / scene ───────────────────────────────────────────────────── */
+
+const stage = document.getElementById('stage');
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0b0f19);
-scene.fog = new THREE.Fog(0x0b0f19, 8, 20);
+scene.background = new THREE.Color(PALETTE.bg);
+scene.fog = new THREE.Fog(PALETTE.bg, 9, 19);
 
-const camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.1, 100);
-camera.position.set(4, 3, 5);
+const camera = new THREE.PerspectiveCamera(
+  46,
+  Math.max(1, stage.clientWidth) / Math.max(1, stage.clientHeight),
+  0.1,
+  60,
+);
+camera.position.set(2.78, 2.0, 3.28);
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(container.clientWidth, container.clientHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(Math.max(1, stage.clientWidth), Math.max(1, stage.clientHeight));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.24;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-container.appendChild(renderer.domElement);
+stage.appendChild(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
-controls.dampingFactor = 0.08;
-controls.target.set(0, 0.5, 0);
-controls.minDistance = 2;
-controls.maxDistance = 12;
+controls.dampingFactor = 0.075;
+controls.target.set(0.3, 0.62, 0);
+controls.minDistance = 2.2;
+controls.maxDistance = 11;
+controls.minPolarAngle = 0.18;
+controls.maxPolarAngle = Math.PI / 2 - 0.04;
+controls.update();
 
-// ---- Lighting ----
-const ambient = new THREE.AmbientLight(0x404060, 0.6);
-scene.add(ambient);
-const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
-dirLight.position.set(5, 8, 5);
-dirLight.castShadow = true;
-dirLight.shadow.mapSize.set(1024, 1024);
-scene.add(dirLight);
-const accentLight = new THREE.PointLight(0x06b6d4, 0.8, 10);
-accentLight.position.set(-2, 2, 2);
-scene.add(accentLight);
+/* ── Lighting ───────────────────────────────────────────────────────────── */
 
-// ---- Grid floor ----
-const grid = new THREE.GridHelper(8, 16, 0x1e3a5f, 0x0f2040);
-grid.position.y = -0.5;
+scene.add(new THREE.HemisphereLight(0x9fd0ff, 0x04070b, 0.72));
+
+const key = new THREE.DirectionalLight(0xdfeaf5, 1.75);
+key.position.set(3.6, 6.2, 3.4);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+key.shadow.camera.left = -4.5;
+key.shadow.camera.right = 4.5;
+key.shadow.camera.top = 4.5;
+key.shadow.camera.bottom = -4.5;
+key.shadow.camera.near = 0.5;
+key.shadow.camera.far = 22;
+key.shadow.bias = -0.0006;
+key.shadow.normalBias = 0.022;
+scene.add(key);
+
+const rim = new THREE.DirectionalLight(PALETTE.primary, 1.25);
+rim.position.set(-4.5, 2.4, -3.6);
+scene.add(rim);
+
+const fill = new THREE.PointLight(0x8fc7ff, 17, 9, 2);
+fill.position.set(-2.2, 1.7, 2.6);
+scene.add(fill);
+
+/* ── Ground ─────────────────────────────────────────────────────────────── */
+
+const floor = new THREE.Mesh(
+  new THREE.CircleGeometry(7, 72),
+  new THREE.MeshStandardMaterial({ color: 0x0a1119, roughness: 0.94, metalness: 0.08 }),
+);
+floor.rotation.x = -Math.PI / 2;
+floor.receiveShadow = true;
+scene.add(floor);
+
+const grid = new THREE.GridHelper(14, 28, 0x1f3a52, 0x122233);
+grid.position.y = 0.002;
+grid.material.transparent = true;
+grid.material.opacity = 0.5;
 scene.add(grid);
 
-// ---- Machine base (platform) ----
-const baseGeo = new THREE.BoxGeometry(2.4, 0.3, 1.6);
-const baseMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, metalness: 0.6, roughness: 0.4 });
-const base = new THREE.Mesh(baseGeo, baseMat);
-base.position.y = -0.35;
-base.receiveShadow = true;
-scene.add(base);
+/* ── Materials ──────────────────────────────────────────────────────────── */
 
-// ---- Motor housing ----
-const motorGeo = new THREE.CylinderGeometry(0.4, 0.4, 1.0, 32);
-const motorMat = new THREE.MeshStandardMaterial({ color: 0x10b981, metalness: 0.5, roughness: 0.3, emissive: 0x000000 });
-const motor = new THREE.Mesh(motorGeo, motorMat);
-motor.position.y = 0.3;
-motor.castShadow = true;
-scene.add(motor);
+const matSteel = new THREE.MeshStandardMaterial({ color: PALETTE.steel, metalness: 0.78, roughness: 0.52 });
+const matCast = new THREE.MeshStandardMaterial({ color: 0x2b3744, metalness: 0.48, roughness: 0.64 });
+const matPaint = new THREE.MeshStandardMaterial({
+  color: 0x33607f,
+  metalness: 0.5,
+  roughness: 0.44,
+  emissive: new THREE.Color(0x000000),
+});
+const matChrome = new THREE.MeshStandardMaterial({ color: PALETTE.chrome, metalness: 0.95, roughness: 0.18 });
+const matBrake = new THREE.MeshStandardMaterial({ color: 0x3b4b5c, metalness: 0.7, roughness: 0.4 });
+const matBrass = new THREE.MeshStandardMaterial({ color: 0xc7a54a, metalness: 0.9, roughness: 0.32 });
 
-// ---- Motor shaft (rotates) ----
-const shaftGeo = new THREE.CylinderGeometry(0.08, 0.08, 0.6, 16);
-const shaftMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.8, roughness: 0.2 });
-const shaft = new THREE.Mesh(shaftGeo, shaftMat);
-shaft.position.y = 0.9;
-scene.add(shaft);
+/* ── Machine ────────────────────────────────────────────────────────────── */
 
-// ---- Motor end cap ----
-const capGeo = new THREE.CylinderGeometry(0.42, 0.42, 0.1, 32);
-const capMat = new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.7, roughness: 0.3 });
-const cap = new THREE.Mesh(capGeo, capMat);
-cap.position.y = 0.85;
-scene.add(cap);
+const BODY_Y = 0.82;
+const machine = new THREE.Group();      // bolted base — never moves
+const rig = new THREE.Group();          // motor assembly — wobbles with vibration
+machine.add(rig);
+scene.add(machine);
 
-// ---- Proximity ring (danger zone) ----
-const ringGeo = new THREE.TorusGeometry(1.6, 0.04, 8, 64);
-const ringMat = new THREE.MeshStandardMaterial({ color: 0x10b981, emissive: 0x000000, transparent: true, opacity: 0.6 });
-const ring = new THREE.Mesh(ringGeo, ringMat);
-ring.rotation.x = Math.PI / 2;
-ring.position.y = -0.1;
-scene.add(ring);
+function add(mesh, x, y, z, parent = rig) {
+  mesh.position.set(x, y, z);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  parent.add(mesh);
+  return mesh;
+}
 
-// ---- Badge (worker) marker ----
-const badgeGeo = new THREE.SphereGeometry(0.12, 16, 16);
-const badgeMat = new THREE.MeshStandardMaterial({ color: 0xf59e0b, emissive: 0x332200 });
-const badge = new THREE.Mesh(badgeGeo, badgeMat);
-badge.position.set(2.0, 0.3, 0);
-badge.visible = false;
-scene.add(badge);
+// Base plate + hold-down bolts
+add(new THREE.Mesh(new THREE.BoxGeometry(2.45, 0.14, 1.18), matSteel), 0.05, 0.07, 0, machine);
+const boltGeo = new THREE.CylinderGeometry(0.045, 0.045, 0.05, 12);
+[[-1.02, -0.42], [-1.02, 0.42], [1.12, -0.42], [1.12, 0.42], [0.05, -0.53], [0.05, 0.53]].forEach(([x, z]) => {
+  add(new THREE.Mesh(boltGeo, matChrome), x, 0.16, z, machine);
+});
 
-// ---- State ----
-let motorState = 'RUNNING';
-let interlockActive = false;
-let proximityBreach = false;
-let activeWorker = null;
-let currentTemp = 34.0;
-let currentRms = 0.05;
-let shaftSpeed = 0.15;
+// Mounting feet
+const footGeo = new THREE.BoxGeometry(0.52, 0.26, 0.96);
+[-0.46, 0.46].forEach((x) => add(new THREE.Mesh(footGeo, matCast), x, 0.27, 0, machine));
 
-// ---- WebSocket connection ----
-const params = new URLSearchParams(window.location.search);
-const deviceId = params.get('device_id') || 'machino_node_01';
-const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-const wsHost = window.location.host || '127.0.0.1:8000';
-const wsUrl = `${wsProtocol}//${wsHost}/ws/live?device_id=${encodeURIComponent(deviceId)}`;
+// Stator housing
+const bodyMesh = add(
+  new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 1.36, 48), matPaint),
+  0,
+  BODY_Y,
+  0,
+);
+bodyMesh.rotation.z = Math.PI / 2;
 
-const wsStatusEl = document.getElementById('wsStatus');
-let ws = null;
+// Cooling fins — one instanced mesh keeps the draw calls down
+const finCount = 26;
+const finGeo = new THREE.CylinderGeometry(0.452, 0.452, 0.02, 44, 1, true);
+const fins = new THREE.InstancedMesh(finGeo, matCast, finCount);
+const finMatrix = new THREE.Matrix4();
+const finQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, Math.PI / 2));
+const finScale = new THREE.Vector3(1, 1, 1);
+for (let i = 0; i < finCount; i += 1) {
+  const x = -0.62 + (i * 1.24) / (finCount - 1);
+  finMatrix.compose(new THREE.Vector3(x, BODY_Y, 0), finQuat, finScale);
+  fins.setMatrixAt(i, finMatrix);
+}
+fins.castShadow = true;
+fins.receiveShadow = true;
+rig.add(fins);
+
+// End bells with bolt circles
+[-0.71, 0.71].forEach((x) => {
+  const bell = add(new THREE.Mesh(new THREE.CylinderGeometry(0.445, 0.445, 0.1, 48), matCast), x, BODY_Y, 0);
+  bell.rotation.z = Math.PI / 2;
+  for (let i = 0; i < 6; i += 1) {
+    const a = (i / 6) * Math.PI * 2;
+    const b = add(
+      new THREE.Mesh(new THREE.CylinderGeometry(0.024, 0.024, 0.08, 10), matChrome),
+      x + Math.sign(x) * 0.03,
+      BODY_Y + Math.sin(a) * 0.34,
+      Math.cos(a) * 0.34,
+    );
+    b.rotation.z = Math.PI / 2;
+  }
+});
+
+// Terminal box + conduit
+add(new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.19, 0.28), matCast), 0.06, BODY_Y + 0.51, 0);
+add(new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.03, 0.23), matSteel), 0.06, BODY_Y + 0.615, 0);
+[-0.08, 0.2].forEach((x) => {
+  add(new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.032, 0.16, 12), matSteel), x, BODY_Y + 0.7, 0.03);
+});
+
+// Nameplate
+add(new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.09, 0.012), matBrass), -0.18, BODY_Y + 0.02, 0.425);
+
+// Shaft, coupling, brake disc
+const shaft = add(new THREE.Mesh(new THREE.CylinderGeometry(0.058, 0.058, 0.62, 24), matChrome), 1.02, BODY_Y, 0);
+shaft.rotation.z = Math.PI / 2;
+
+const coupling = add(new THREE.Mesh(new THREE.CylinderGeometry(0.115, 0.115, 0.16, 28), matSteel), 0.9, BODY_Y, 0);
+coupling.rotation.z = Math.PI / 2;
+[[0, 0.115], [0.1, -0.057], [-0.1, -0.057]].forEach(([x, y]) => {
+  const grub = add(new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.05, 8), matBrass), x, BODY_Y + y, 0);
+  grub.rotation.x = Math.PI / 2;
+});
+
+const brakeDisc = add(new THREE.Mesh(new THREE.CylinderGeometry(0.205, 0.205, 0.026, 40), matChrome), 1.14, BODY_Y, 0);
+brakeDisc.rotation.z = Math.PI / 2;
+
+const caliper = add(new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.17, 0.1), matBrake), 1.14, BODY_Y + 0.2, 0);
+
+// Driven pulley — the only part whose rotation is legible
+const spinner = new THREE.Group();
+spinner.position.set(1.32, BODY_Y, 0);
+rig.add(spinner);
+
+const pulley = new THREE.Mesh(new THREE.TorusGeometry(0.27, 0.055, 18, 56), matSteel);
+pulley.rotation.y = Math.PI / 2;
+pulley.castShadow = true;
+spinner.add(pulley);
+
+const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.075, 0.12, 24), matChrome);
+hub.rotation.z = Math.PI / 2;
+hub.castShadow = true;
+spinner.add(hub);
+
+const spokeGeo = new THREE.BoxGeometry(0.028, 0.5, 0.05);
+for (let i = 0; i < 6; i += 1) {
+  const spoke = new THREE.Mesh(spokeGeo, matSteel);
+  spoke.rotation.x = (i / 6) * Math.PI * 2;
+  spoke.castShadow = true;
+  spinner.add(spoke);
+}
+
+const guard = new THREE.Mesh(
+  new THREE.TorusGeometry(0.34, 0.016, 10, 64),
+  new THREE.MeshStandardMaterial({
+    color: PALETTE.primary,
+    metalness: 0.3,
+    roughness: 0.6,
+    transparent: true,
+    opacity: 0.28,
+  }),
+);
+guard.rotation.y = Math.PI / 2;
+guard.position.set(1.32, BODY_Y, 0);
+rig.add(guard);
+
+// Beacon — strobes on lockout
+add(new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.07, 0.09, 16), matCast), -0.62, BODY_Y + 0.5, 0).castShadow = false;
+
+const beaconMat = new THREE.MeshStandardMaterial({
+  color: 0x3a1414,
+  emissive: new THREE.Color(PALETTE.bad),
+  emissiveIntensity: 0.15,
+  metalness: 0.2,
+  roughness: 0.35,
+});
+const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.075, 20, 16), beaconMat);
+beacon.position.set(-0.62, BODY_Y + 0.575, 0);
+rig.add(beacon);
+
+const beaconLight = new THREE.PointLight(PALETTE.bad, 0, 4.5, 2);
+beaconLight.position.copy(beacon.position);
+rig.add(beaconLight);
+
+function radialGlowTexture() {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const gradient = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  gradient.addColorStop(0, 'rgba(255,255,255,1)');
+  gradient.addColorStop(0.32, 'rgba(255,255,255,0.42)');
+  gradient.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, size, size);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
+const glowTexture = radialGlowTexture();
+
+// A soft pool of light under the machine keeps the empty floor from going flat black.
+const lightPool = new THREE.Mesh(
+  new THREE.PlaneGeometry(11, 11),
+  new THREE.MeshBasicMaterial({
+    map: glowTexture,
+    color: 0x264f72,
+    transparent: true,
+    opacity: 0.3,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  }),
+);
+lightPool.rotation.x = -Math.PI / 2;
+lightPool.position.set(0.1, 0.004, 0);
+scene.add(lightPool);
+
+
+const beaconGlow = new THREE.Sprite(
+  new THREE.SpriteMaterial({
+    map: glowTexture,
+    color: PALETTE.bad,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  }),
+);
+beaconGlow.scale.setScalar(1.1);
+beaconGlow.position.copy(beacon.position);
+rig.add(beaconGlow);
+
+/* ── Safety envelope ─────────────────────────────────────────────────────── */
+
+const zoneFill = new THREE.Mesh(
+  new THREE.RingGeometry(1.05, 1.86, 72, 1),
+  new THREE.MeshBasicMaterial({
+    color: PALETTE.ok,
+    transparent: true,
+    opacity: 0.05,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  }),
+);
+zoneFill.rotation.x = -Math.PI / 2;
+zoneFill.position.y = 0.012;
+scene.add(zoneFill);
+
+const zoneMat = new THREE.MeshBasicMaterial({
+  color: PALETTE.ok,
+  transparent: true,
+  opacity: 0.55,
+});
+const zoneRing = new THREE.Mesh(new THREE.TorusGeometry(1.86, 0.022, 10, 96), zoneMat);
+zoneRing.rotation.x = Math.PI / 2;
+zoneRing.position.y = 0.03;
+scene.add(zoneRing);
+
+// Dashed outer tick ring, slowly rotating for a scan feel
+const ticks = new THREE.Group();
+const tickGeo = new THREE.BoxGeometry(0.07, 0.012, 0.02);
+const tickMat = new THREE.MeshBasicMaterial({ color: 0x2c4a66, transparent: true, opacity: 0.7 });
+for (let i = 0; i < 48; i += 1) {
+  if (i % 2) continue;
+  const tick = new THREE.Mesh(tickGeo, tickMat);
+  const a = (i / 48) * Math.PI * 2;
+  tick.position.set(Math.cos(a) * 2.16, 0.02, Math.sin(a) * 2.16);
+  tick.rotation.y = -a;
+  ticks.add(tick);
+}
+scene.add(ticks);
+
+/* ── Worker marker ───────────────────────────────────────────────────────── */
+
+// A person marker rather than a coloured blob: graphite suit, hi-vis vest and
+// helmet. Only the accent parts take the state colour.
+const workerSuit = new THREE.MeshStandardMaterial({
+  color: 0x3d4855,
+  metalness: 0.15,
+  roughness: 0.82,
+});
+const workerMat = new THREE.MeshStandardMaterial({
+  color: PALETTE.warn,
+  emissive: new THREE.Color(PALETTE.warn),
+  emissiveIntensity: 0.35,
+  metalness: 0.1,
+  roughness: 0.6,
+});
+
+const worker = new THREE.Group();
+worker.position.set(1.55, 0, 0.6);
+worker.visible = false;
+scene.add(worker);
+
+const workerBody = new THREE.Mesh(new THREE.CapsuleGeometry(0.115, 0.62, 8, 14), workerSuit);
+workerBody.position.y = 0.47;
+workerBody.castShadow = true;
+worker.add(workerBody);
+
+const workerVest = new THREE.Mesh(
+  new THREE.CylinderGeometry(0.132, 0.142, 0.3, 18, 1, true),
+  new THREE.MeshStandardMaterial({
+    color: PALETTE.warn,
+    emissive: new THREE.Color(PALETTE.warn),
+    emissiveIntensity: 0.35,
+    metalness: 0.1,
+    roughness: 0.6,
+    side: THREE.DoubleSide,
+  }),
+);
+workerVest.position.y = 0.66;
+worker.add(workerVest);
+
+const workerHead = new THREE.Mesh(new THREE.SphereGeometry(0.095, 18, 14), workerMat);
+workerHead.position.y = 1.0;
+workerHead.castShadow = true;
+worker.add(workerHead);
+
+// Footprint marker so a worker behind the motor still reads as a person.
+const workerRing = new THREE.Mesh(
+  new THREE.TorusGeometry(0.3, 0.012, 8, 40),
+  new THREE.MeshBasicMaterial({ color: PALETTE.warn, transparent: true, opacity: 0.7 }),
+);
+workerRing.rotation.x = Math.PI / 2;
+workerRing.position.y = 0.02;
+workerRing.visible = false;
+scene.add(workerRing);
+
+const workerGlow = new THREE.Sprite(
+  new THREE.SpriteMaterial({
+    map: glowTexture,
+    color: PALETTE.warn,
+    transparent: true,
+    opacity: 0.28,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  }),
+);
+workerGlow.scale.setScalar(0.95);
+workerGlow.visible = false;
+scene.add(workerGlow);
+
+/* ── State ───────────────────────────────────────────────────────────────── */
+
+const state = {
+  motor: 'UNKNOWN',
+  interlock: false,
+  breach: false,
+  vicinity: false,
+  ppe: false,
+  workerId: null,
+  anomaly: 0,
+  isAnomaly: false,
+  contributor: null,
+  rms: null,
+  temp: null,
+  current: null,
+  voltage: null,
+  incidents: 0,
+  lastAt: 0,
+  connected: false,
+};
+
+const history = [];
+const HISTORY_MAX = 96;
+
+let spinSpeed = 0;
+let spinTarget = 0;
+let cameraTween = null;
+let bootDone = false;
+
+/* ── HUD helpers ─────────────────────────────────────────────────────────── */
+
+const $ = (id) => document.getElementById(id);
+
+function setText(id, value) {
+  const el = $(id);
+  if (el && el.textContent !== value) el.textContent = value;
+}
+
+function setHtml(id, html) {
+  const el = $(id);
+  if (el && el.innerHTML !== html) el.innerHTML = html;
+}
+
+function setState(id, key) {
+  const el = $(id);
+  if (!el) return;
+  if (key) el.dataset.state = key;
+  else delete el.dataset.state;
+}
+
+function fmt(value, digits) {
+  if (value === null || value === undefined || value === '') return '--';
+  const n = Number(value);
+  return Number.isFinite(n) ? n.toFixed(digits) : '--';
+}
+
+/* ── Snapshot handling ───────────────────────────────────────────────────── */
+
+function applySnapshot(d) {
+  const tel = d.latest_telemetry || {};
+
+  state.motor = String(d.motor_state || 'UNKNOWN').toUpperCase();
+  state.interlock = !!d.interlock_active;
+  state.breach = !!d.proximity_breach_active;
+  state.vicinity = !!d.vicinity_presence_active;
+  state.ppe = String(d.vicinity_status || '').toUpperCase() === 'AUTHORIZED_OPERATOR_PPE_VERIFIED';
+  state.workerId = d.active_worker_id || null;
+  state.anomaly = Number(d.anomaly_percentage) || 0;
+  state.isAnomaly = !!d.is_anomaly;
+  state.contributor = d.top_contributor || null;
+  state.rms = d.current_rms ?? tel.rms ?? null;
+  state.temp = d.current_temp_c ?? tel.temperature_c ?? null;
+  state.current = d.current_ma ?? tel.current_ma ?? null;
+  state.voltage = tel.voltage_v ?? d.current_voltage_v ?? null;
+  state.incidents = Array.isArray(d.open_incidents) ? d.open_incidents.length : 0;
+  state.lastAt = Date.now();
+  state.connected = true;
+
+  const toNum = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v));
+  history.push({ rms: toNum(state.rms), temp: toNum(state.temp) });
+  if (history.length > HISTORY_MAX) history.shift();
+
+  paintHud();
+  paintMachine();
+  drawTrace();
+}
+
+function paintHud() {
+  const engineHot = state.temp !== null && Number(state.temp) >= 45;
+  const vibHigh = state.rms !== null && Number(state.rms) >= 0.15;
+
+  setText('motor', state.motor);
+  setState('motor', state.motor === 'RUNNING' ? 'ok' : state.motor === 'LOCKED' ? 'bad' : '');
+
+  setText('interlock', state.interlock ? 'ENGAGED' : 'CLEAR');
+  setState('interlock', state.interlock ? 'bad' : 'ok');
+
+  if (!state.vicinity) {
+    setText('vicinity', 'CLEAR');
+    setState('vicinity', 'ok');
+  } else {
+    setText('vicinity', state.workerId ? String(state.workerId).slice(0, 18) : 'PERSON DETECTED');
+    setState('vicinity', state.breach ? 'bad' : 'warn');
+  }
+
+  if (!state.vicinity) {
+    setText('ppe', 'IDLE');
+    setState('ppe', '');
+  } else if (state.ppe) {
+    setText('ppe', 'VERIFIED');
+    setState('ppe', 'ok');
+  } else {
+    setText('ppe', state.breach ? 'VIOLATION' : 'CHECKING');
+    setState('ppe', state.breach ? 'bad' : 'warn');
+  }
+
+  setHtml('vib', `${fmt(state.rms, 3)}<small>g</small>`);
+  setState('vib', vibHigh ? (state.isAnomaly ? 'bad' : 'warn') : 'ok');
+
+  setHtml('current', `${fmt(state.current, 0)}<small>mA</small>`);
+
+  setHtml('voltage', `${fmt(state.voltage, 2)}<small>V</small>`);
+
+  setHtml('temp', `${fmt(state.temp, 1)}<small>°C</small>`);
+  setState('temp', engineHot ? 'warn' : 'ok');
+
+  setText('incidents', state.incidents > 0 ? String(state.incidents) : '0');
+  setState('incidents', state.incidents > 0 ? 'warn' : '');
+
+  const pct = Math.max(0, Math.min(100, Number(state.anomaly) || 0));
+  setText('anomPct', `${pct.toFixed(1)}%`);
+  const fill = $('anomFill');
+  fill.style.width = `${Math.max(2, pct)}%`;
+  fill.style.background = state.isAnomaly
+    ? 'linear-gradient(90deg, #ff6b6b, #ffb0b0)'
+    : pct >= 35
+      ? 'linear-gradient(90deg, #e3b341, #f3d68a)'
+      : 'linear-gradient(90deg, #45d48a, #8fe6b6)';
+  setText(
+    'contrib',
+    state.isAnomaly && state.contributor
+      ? `Driven by ${state.contributor}`
+      : state.contributor
+        ? `Dominant signal: ${state.contributor}`
+        : 'no dominant sensor — inside the calibrated band',
+  );
+
+  const statusKey = state.interlock
+    ? 'bad'
+    : state.breach
+      ? 'bad'
+      : state.anomaly >= 60
+        ? 'warn'
+        : state.vicinity
+          ? state.ppe
+            ? 'ok'
+            : 'warn'
+          : 'ok';
+
+  const statusText = state.interlock
+    ? 'EMERGENCY LOCKOUT · MOTOR BRAKED'
+    : state.breach
+      ? 'PROXIMITY BREACH · PPE UNVERIFIED'
+      : state.isAnomaly
+        ? `ANOMALY ${pct.toFixed(1)}%${state.contributor ? ` · ${String(state.contributor).toUpperCase()}` : ''}`
+        : state.vicinity
+          ? state.ppe
+            ? 'WORKER IN VICINITY · PPE VERIFIED'
+            : 'WORKER IN VICINITY · PPE CHECK RUNNING'
+          : `SYSTEM NOMINAL · MOTOR ${state.motor}`;
+
+  const statusEl = $('status');
+  if (statusEl.textContent !== statusText) statusEl.textContent = statusText;
+  statusEl.dataset.state = statusKey;
+}
+
+function paintMachine() {
+  // Shaft/fan target speed follows state; actual speed is eased in animate().
+  const loaded = Number(state.current) || 0;
+  spinTarget =
+    state.motor === 'RUNNING' && !state.interlock
+      ? 3.4 + Math.min(1, loaded / 900) * 5.2
+      : 0;
+
+  // Ambient shell: green when running, cyan when idle, red when locked.
+  const shell = state.interlock ? PALETTE.bad : state.motor === 'RUNNING' ? PALETTE.ok : PALETTE.primary;
+  zoneMat.color.setHex(shell);
+  zoneMat.opacity = state.interlock || state.breach ? 0.85 : state.vicinity ? 0.62 : 0.38;
+  zoneFill.material.color.setHex(shell);
+  zoneFill.material.opacity = state.interlock || state.breach ? 0.12 : 0.05;
+
+  // Beacon colour follows the cell state: green powered, amber degraded, red alarm.
+  const beaconTint = state.interlock || state.breach
+    ? PALETTE.bad
+    : state.isAnomaly || (state.vicinity && !state.ppe)
+      ? PALETTE.warn
+      : state.motor === 'RUNNING'
+        ? PALETTE.ok
+        : PALETTE.primary;
+  beaconMat.emissive.setHex(beaconTint);
+  beaconGlow.material.color.setHex(beaconTint);
+  beaconLight.color.setHex(beaconTint);
+
+  // Worker marker
+  const showWorker = state.vicinity || !!state.workerId;
+  worker.visible = showWorker;
+  workerGlow.visible = showWorker;
+  workerRing.visible = showWorker;
+  if (showWorker) {
+    const wc = state.ppe ? PALETTE.ok : state.breach ? PALETTE.bad : PALETTE.warn;
+    workerMat.color.setHex(wc);
+    workerMat.emissive.setHex(wc);
+    workerVest.material.color.setHex(wc);
+    workerVest.material.emissive.setHex(wc);
+    workerGlow.material.color.setHex(wc);
+    workerRing.material.color.setHex(wc);
+  }
+}
+
+/* ── Trace sparklines ────────────────────────────────────────────────────── */
+
+const traceCanvas = $('trace');
+
+function drawSeries(ctx, values, w, h, top, colour) {
+  const valid = values.filter((v) => Number.isFinite(v));
+  if (valid.length < 2) {
+    ctx.fillStyle = 'rgba(113,135,154,0.5)';
+    ctx.font = '8px ui-monospace, monospace';
+    ctx.fillText('awaiting samples', 2, top + h / 2 + 3);
+    return;
+  }
+
+  const min = Math.min(...valid);
+  const max = Math.max(...valid);
+  const span = max - min || Math.max(Math.abs(max) * 0.1, 0.001);
+
+  ctx.beginPath();
+  values.forEach((value, i) => {
+    const x = (i / Math.max(1, values.length - 1)) * (w - 2) + 1;
+    const y = top + h - ((value - min) / span) * (h - 3) - 1.5;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = colour;
+  ctx.lineWidth = 1.4;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+
+  ctx.lineTo(w - 1, top + h);
+  ctx.lineTo(1, top + h);
+  ctx.closePath();
+  ctx.fillStyle = colour.replace('rgb', 'rgba').replace(')', ',0.12)');
+  ctx.fill();
+
+  const last = values[values.length - 1];
+  const ly = top + h - ((last - min) / span) * (h - 3) - 1.5;
+  ctx.beginPath();
+  ctx.arc(w - 2, ly, 2, 0, Math.PI * 2);
+  ctx.fillStyle = colour;
+  ctx.fill();
+}
+
+function drawTrace() {
+  if (!traceCanvas) return;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.max(40, traceCanvas.clientWidth);
+  const h = Math.max(20, traceCanvas.clientHeight);
+
+  if (traceCanvas.width !== Math.round(w * dpr)) {
+    traceCanvas.width = Math.round(w * dpr);
+    traceCanvas.height = Math.round(h * dpr);
+  }
+
+  const ctx = traceCanvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+
+  const half = h / 2 - 3;
+  ctx.strokeStyle = 'rgba(111,183,255,0.12)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, h / 2);
+  ctx.lineTo(w, h / 2);
+  ctx.stroke();
+
+  drawSeries(ctx, history.map((p) => p.rms), w, half, 0, 'rgb(111,183,255)');
+  drawSeries(ctx, history.map((p) => p.temp), w, half, h / 2 + 2, 'rgb(227,179,65)');
+}
+
+/* ── Link badge / staleness ──────────────────────────────────────────────── */
+
+function paintLink() {
+  const age = state.lastAt ? (Date.now() - state.lastAt) / 1000 : Infinity;
+  const link = $('link');
+  const statusEl = $('status');
+
+  if (demoMode) {
+    link.textContent = 'DEMO';
+    link.dataset.state = 'warn';
+    return;
+  }
+
+  if (!state.connected || age > 6) {
+    link.textContent = state.connected ? `STALE ${age.toFixed(0)}s` : 'OFFLINE';
+    link.dataset.state = 'bad';
+    statusEl.textContent = 'TELEMETRY LOST · RECONNECTING';
+    statusEl.dataset.state = 'bad';
+    return;
+  }
+
+  link.textContent = 'LIVE';
+  link.dataset.state = 'ok';
+}
+
+setInterval(paintLink, 400);
+setInterval(() => {
+  if (state.lastAt && (Date.now() - state.lastAt) / 1000 > 6) {
+    state.connected = false;
+    paintLink();
+  }
+}, 1000);
+
+/* ── WebSocket ───────────────────────────────────────────────────────────── */
+
+let socket = null;
+let reconnectDelay = 800;
 let reconnectTimer = null;
 
-function connectWS() {
+function wsUrl() {
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const host = hostOverride || window.location.host || '127.0.0.1:8000';
+  return `${proto}//${host}/ws/live?device_id=${encodeURIComponent(deviceId)}`;
+}
+
+function connect() {
+  if (demoMode) return;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
   try {
-    ws = new WebSocket(wsUrl);
-    ws.onopen = () => {
-      wsStatusEl.textContent = 'connected';
-      wsStatusEl.className = 'value connected';
-      if (reconnectTimer) { clearInterval(reconnectTimer); reconnectTimer = null; }
-    };
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === 'snapshot') handleSnapshot(data);
-      } catch (e) { /* ignore */ }
-    };
-    ws.onclose = () => {
-      wsStatusEl.textContent = 'disconnected';
-      wsStatusEl.className = 'value disconnected';
-      if (!reconnectTimer) reconnectTimer = setInterval(connectWS, 3000);
-    };
-    ws.onerror = () => { ws.close(); };
-  } catch (e) {
-    wsStatusEl.textContent = 'error';
-    wsStatusEl.className = 'value disconnected';
-  }
-}
-connectWS();
-
-function handleSnapshot(d) {
-  motorState = d.motor_state || 'UNKNOWN';
-  interlockActive = !!d.interlock_active;
-  proximityBreach = !!d.proximity_breach_active;
-  activeWorker = d.active_worker_id || null;
-  currentTemp = d.current_temp_c || 34.0;
-  currentRms = d.current_rms || 0.05;
-
-  // Update overlay
-  document.getElementById('motorState').textContent = motorState;
-  document.getElementById('interlock').textContent = interlockActive ? 'ENGAGED' : 'CLEAR';
-  document.getElementById('proximity').textContent = proximityBreach ? 'BREACH' : 'CLEAR';
-  document.getElementById('worker').textContent = activeWorker || 'none';
-  document.getElementById('vib').textContent = currentRms.toFixed(3) + ' g';
-  document.getElementById('temp').textContent = currentTemp.toFixed(1) + ' C';
-  document.getElementById('current').textContent = (d.current_ma || 0).toFixed(0) + ' mA';
-
-  // Color motor based on state
-  let motorColor = 0x10b981; // green
-  if (interlockActive) motorColor = 0xef4444; // red
-  else if (proximityBreach) motorColor = 0xf59e0b; // amber
-  motor.material.color.setHex(motorColor);
-  motor.material.emissive.setHex(interlockActive ? 0x330000 : 0x000000);
-  shaft.material.color.setHex(interlockActive ? 0xef4444 : 0x94a3b8);
-  cap.material.color.setHex(interlockActive ? 0x7f1d1d : 0x334155);
-
-  // Ring color
-  let ringColor = 0x10b981;
-  if (proximityBreach) ringColor = 0xf59e0b;
-  if (interlockActive) ringColor = 0xef4444;
-  ring.material.color.setHex(ringColor);
-  ring.material.emissive.setHex(proximityBreach || interlockActive ? ringColor : 0x000000);
-  ring.material.opacity = (proximityBreach || interlockActive) ? 0.9 : 0.4;
-
-  // Badge visibility
-  badge.visible = !!activeWorker;
-  if (activeWorker) {
-    badge.material.color.setHex(proximityBreach ? 0xf59e0b : 0x10b981);
+    socket = new WebSocket(wsUrl());
+  } catch (err) {
+    scheduleReconnect();
+    return;
   }
 
-  // Temperature -> motor emissive intensity (subtle heat glow)
-  const heat = Math.max(0, (currentTemp - 30) / 35);
-  motor.material.emissive.setRGB(heat * 0.3, 0, 0);
+  socket.onopen = () => {
+    reconnectDelay = 800;
+    state.connected = true;
+    paintLink();
+  };
 
-  // Status bar
-  const statusBar = document.getElementById('status-bar');
-  if (interlockActive) {
-    statusBar.textContent = 'EMERGENCY LOCKOUT ACTIVE';
-    statusBar.style.background = 'rgba(239,68,68,0.2)';
-    statusBar.style.borderColor = '#ef4444';
-    statusBar.style.color = '#ef4444';
-  } else if (proximityBreach) {
-    statusBar.textContent = 'PROXIMITY BREACH DETECTED';
-    statusBar.style.background = 'rgba(245,158,11,0.2)';
-    statusBar.style.borderColor = '#f59e0b';
-    statusBar.style.color = '#f59e0b';
-  } else {
-    statusBar.textContent = 'SYSTEM NOMINAL';
-    statusBar.style.background = 'rgba(16,185,129,0.2)';
-    statusBar.style.borderColor = '#10b981';
-    statusBar.style.color = '#10b981';
-  }
+  socket.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data && data.type === 'snapshot') applySnapshot(data);
+    } catch (err) {
+      /* ignore malformed frames */
+    }
+  };
+
+  socket.onclose = () => {
+    state.connected = false;
+    paintLink();
+    scheduleReconnect();
+  };
+
+  socket.onerror = () => {
+    try {
+      socket.close();
+    } catch (err) {
+      /* noop */
+    }
+  };
 }
 
-// ---- Animation loop ----
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect();
+  }, reconnectDelay);
+  reconnectDelay = Math.min(reconnectDelay * 1.7, 12000);
+}
+
+connect();
+
+/* ── Demo telemetry (offline screenshots / stand-ins) ────────────────────── */
+
+if (demoMode) {
+  const phases = [
+    { name: 'idle', ms: 4000 },
+    { name: 'running', ms: 6000 },
+    { name: 'anomaly', ms: 5000 },
+    { name: 'vicinity', ms: 4000 },
+    { name: 'breach', ms: 6000 },
+  ];
+  let phaseIndex = 0;
+  let phaseStart = Date.now();
+  let t = 0;
+
+  setInterval(() => {
+    const now = Date.now();
+    const phase = phases[phaseIndex];
+    if (now - phaseStart > phase.ms) {
+      phaseIndex = (phaseIndex + 1) % phases.length;
+      phaseStart = now;
+    }
+    t += 0.7;
+
+    const running = phase.name !== 'idle' && phase.name !== 'breach';
+    const breach = phase.name === 'breach';
+    const anomaly = phase.name === 'anomaly';
+    const vicinity = phase.name === 'vicinity' || breach;
+
+    applySnapshot({
+      type: 'snapshot',
+      device_id: deviceId,
+      motor_state: breach ? 'LOCKED' : running ? 'RUNNING' : 'IDLE',
+      interlock_active: breach,
+      proximity_breach_active: breach,
+      vicinity_presence_active: vicinity,
+      vicinity_status: breach
+        ? 'UNAUTHORIZED_PERSON_IN_VICINITY'
+        : vicinity
+          ? 'AUTHORIZED_OPERATOR_PPE_VERIFIED'
+          : 'NOMINAL',
+      active_worker_id: vicinity ? 'badge-0x7f3a' : null,
+      is_anomaly: anomaly,
+      anomaly_percentage: anomaly ? 62 + Math.sin(t) * 9 : 3 + Math.sin(t * 0.7) * 2,
+      anomaly_score: anomaly ? 0.31 : -0.11,
+      top_contributor: anomaly ? 'Motor Current (INA219)' : 'Multi-Modal Sensor Array (Nominal)',
+      current_rms: 0.03 + Math.random() * 0.012 + (anomaly ? 0.14 : 0),
+      current_temp_c: 28.4 + Math.sin(t * 0.3) * 1.2 + (anomaly ? 9 : 0),
+      current_ma: running ? 210 + Math.random() * 40 : 2,
+      latest_telemetry: {
+        rms: 0.03 + Math.random() * 0.012 + (anomaly ? 0.14 : 0),
+        temperature_c: 28.4 + Math.sin(t * 0.3) * 1.2 + (anomaly ? 9 : 0),
+        current_ma: running ? 210 + Math.random() * 40 : 2,
+        voltage_v: 11.9 + Math.sin(t * 0.2) * 0.06,
+      },
+      open_incidents: breach ? [{ id: 'inc-1' }] : [],
+      timestamp: new Date().toISOString(),
+    });
+  }, 700);
+}
+
+/* ── Camera presets ──────────────────────────────────────────────────────── */
+
+const PRESETS = {
+  iso: { position: new THREE.Vector3(2.78, 2.0, 3.28), target: new THREE.Vector3(0.3, 0.62, 0) },
+  front: { position: new THREE.Vector3(4.2, 1.5, 1.6), target: new THREE.Vector3(0.5, 0.7, 0) },
+  top: { position: new THREE.Vector3(0.3, 5.6, 1.6), target: new THREE.Vector3(0.2, 0.1, 0) },
+};
+
+function setPreset(name) {
+  const preset = PRESETS[name];
+  if (!preset) return;
+
+  cameraTween = {
+    fromPos: camera.position.clone(),
+    toPos: preset.position.clone(),
+    fromTarget: controls.target.clone(),
+    toTarget: preset.target.clone(),
+    started: performance.now(),
+    duration: reducedMotion ? 1 : 620,
+  };
+  controls.enabled = false;
+
+  document.querySelectorAll('#presets button').forEach((btn) => {
+    btn.setAttribute('aria-pressed', String(btn.dataset.preset === name));
+  });
+}
+
+document.querySelectorAll('#presets button').forEach((btn) => {
+  btn.addEventListener('click', () => setPreset(btn.dataset.preset));
+});
+
+/* ── Animate ─────────────────────────────────────────────────────────────── */
+
 const clock = new THREE.Clock();
+let elapsed = 0;
+
 function animate() {
   requestAnimationFrame(animate);
-  const delta = clock.getDelta();
 
-  // Rotate shaft when running
-  if (motorState === 'RUNNING' && !interlockActive) {
-    shaft.rotation.y += shaftSpeed * (1 + currentRms * 5);
-    motor.rotation.y += shaftSpeed * 0.3;
+  const dt = Math.min(clock.getDelta(), 0.05);
+  elapsed += dt;
+
+  // Eased spindle speed so start/stop reads as inertia, not a switch.
+  spinSpeed += (spinTarget - spinSpeed) * Math.min(1, dt * 3.2);
+  if (spinSpeed > 0.02) spinner.rotation.x += spinSpeed * dt;
+
+  // Vibration — amplitude tracks RMS; only the motor assembly moves, the
+  // bolted base plate stays put.
+  const rms = Number(state.rms);
+  const amp = Number.isFinite(rms) ? Math.min(0.014, Math.max(0, (rms - 0.02) * 0.09)) : 0;
+  const wobble = reducedMotion ? 0 : amp;
+  rig.position.y = Math.sin(elapsed * 42) * wobble;
+  rig.position.z = Math.cos(elapsed * 57) * wobble * 0.6;
+
+  // Heat glow through the paint.
+  const temp = Number(state.temp);
+  const heat = Number.isFinite(temp) ? Math.max(0, Math.min(1, (temp - 38) / 38)) : 0;
+  matPaint.emissive.setRGB(heat * 0.42, heat * 0.06, 0);
+
+  // Brake caliper clamps the disc on lockout.
+  const clampY = state.interlock ? 0.165 : 0.2;
+  caliper.position.y += (BODY_Y + clampY - caliper.position.y) * Math.min(1, dt * 8);
+
+  // Beacon strobe. Idle is a faint ember; lockout is a hard flash.
+  const alarm = state.interlock || state.breach;
+  const beaconOn = alarm
+    ? Math.pow(Math.max(0, Math.sin(elapsed * 7)), 12)
+    : state.isAnomaly
+      ? 0.42 + Math.sin(elapsed * 2.4) * 0.16
+      : 0.5 + Math.sin(elapsed * 1.2) * 0.08;
+  beaconMat.emissiveIntensity = alarm ? 0.3 + beaconOn * 6 : beaconOn;
+  beaconGlow.material.opacity = alarm ? 0.05 + beaconOn * 0.95 : beaconOn * 0.16;
+  beaconLight.intensity = alarm ? beaconOn * 6 : beaconOn * 0.5;
+
+  // Safety ring pulse.
+  const alert = state.interlock || state.breach;
+  const pulse = reducedMotion ? 1 : 1 + Math.sin(elapsed * 3.4) * (alert ? 0.035 : 0.008);
+  zoneRing.scale.setScalar(pulse);
+  ticks.rotation.y += dt * 0.12;
+
+  if (worker.visible) {
+    const orbit = elapsed * (state.breach ? 0.35 : 0.5);
+    const radius = state.breach ? 1.35 : 1.62;
+    const hop = reducedMotion ? 0 : Math.max(0, Math.sin(elapsed * 6)) * 0.02;
+    worker.position.set(Math.cos(orbit) * radius, hop, Math.sin(orbit) * radius);
+    workerGlow.position.set(worker.position.x, 0.85, worker.position.z);
+    workerRing.position.set(worker.position.x, 0.02, worker.position.z);
+    workerMat.emissiveIntensity = 0.25 + (Math.sin(elapsed * 5) * 0.5 + 0.5) * 0.35;
   }
 
-  // Pulse ring on breach
-  if (proximityBreach || interlockActive) {
-    const t = clock.getElapsedTime();
-    ring.scale.setScalar(1 + Math.sin(t * 4) * 0.03);
-  } else {
-    ring.scale.setScalar(1);
-  }
-
-  // Gentle badge orbit when active
-  if (badge.visible) {
-    const t = clock.getElapsedTime();
-    badge.position.x = 1.8 * Math.cos(t * 0.5);
-    badge.position.z = 1.8 * Math.sin(t * 0.5);
+  // Camera preset tween.
+  if (cameraTween) {
+    const k = Math.min(1, (performance.now() - cameraTween.started) / cameraTween.duration);
+    const e = k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+    camera.position.lerpVectors(cameraTween.fromPos, cameraTween.toPos, e);
+    controls.target.lerpVectors(cameraTween.fromTarget, cameraTween.toTarget, e);
+    if (k >= 1) {
+      cameraTween = null;
+      controls.enabled = true;
+    }
   }
 
   controls.update();
   renderer.render(scene, camera);
+
+  if (!bootDone) {
+    bootDone = true;
+    window.__twinBooted = true;
+    const boot = $('boot');
+    boot.classList.add('gone');
+    setTimeout(() => boot.remove(), 600);
+  }
 }
+
 animate();
 
-// ---- Resize handler ----
-window.addEventListener('resize', () => {
-  camera.aspect = container.clientWidth / container.clientHeight;
+/* ── Lifecycle ───────────────────────────────────────────────────────────── */
+
+const resize = () => {
+  const w = Math.max(1, stage.clientWidth);
+  const h = Math.max(1, stage.clientHeight);
+  camera.aspect = w / h;
   camera.updateProjectionMatrix();
-  renderer.setSize(container.clientWidth, container.clientHeight);
+  renderer.setSize(w, h);
+  drawTrace();
+};
+
+if (typeof ResizeObserver !== 'undefined') new ResizeObserver(resize).observe(stage);
+window.addEventListener('resize', resize);
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) clock.getDelta();
 });
+
+renderer.domElement.addEventListener('webglcontextlost', (event) => {
+  event.preventDefault();
+  const boot = $('boot');
+  if (boot) {
+    boot.classList.remove('gone');
+    $('bootErr').textContent = 'GPU context lost. Reload the twin to rebuild the scene.';
+  }
+});
+
+// Seed the scene: the machine idles in its neutral state until telemetry lands,
+// and the status bar says so rather than claiming a nominal cell.
+paintMachine();
+paintLink();
+drawTrace();
 </script>
 </body>
 </html>
