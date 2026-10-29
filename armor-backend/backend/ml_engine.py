@@ -352,11 +352,11 @@ def latest_feature_vector(
 
 
 DEFAULT_RUNNING_BASELINE: dict[str, Any] = {
-    "mean_acc": 0.036,
+    "mean_acc": 0.436,
     "std_acc": 0.015,
     "mean_crest": 1.45,
     "std_crest": 0.25,
-    "mean_current": 175.0,
+    "mean_current": 250.0,
     "std_current": 25.0,
     "mean_voltage": 12.0,
     "std_voltage": 0.2,
